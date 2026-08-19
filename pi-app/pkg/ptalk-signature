@@ -1,0 +1,4 @@
+#!/bin/sh
+# Launcher for PTalk Signature native client.
+export PYTHONPATH="/opt/ptalk-signature:${PYTHONPATH}"
+exec python3 -m ptalk "$@"

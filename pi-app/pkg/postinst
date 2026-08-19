@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  configure)
+    echo "-------------------------------------------------------------"
+    echo " PTalk Signature (native) installed."
+    echo "   Diagnostics : ptalk-signature --check"
+    echo "   Run GUI     : ptalk-signature"
+    echo "   Config      : /etc/ptalk-signature/config.toml"
+    echo "   Kiosk mode  : sudo systemctl enable --now ptalk-signature-kiosk"
+    echo "-------------------------------------------------------------"
+    ;;
+esac
+
+exit 0

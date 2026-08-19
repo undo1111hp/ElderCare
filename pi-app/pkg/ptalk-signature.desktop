@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=PTalk Signature
+Comment=Trợ lý giọng nói & quét thuốc
+Exec=ptalk-signature
+Terminal=false
+Categories=Utility;AudioVideo;

@@ -1,0 +1,1038 @@
+"""Elder Care UI (PyQt6) — multi-screen, responsive, elderly-first.
+
+Screens: Home (voice) · Medicine info · Reminders · Add reminder · Settings,
+plus a fullscreen medication Alarm. Shared warm gradient + starfield background,
+state-driven character mascot, big high-contrast controls. Portrait & landscape.
+"""
+import math
+import os
+import random
+import subprocess
+import threading
+import time
+
+from PyQt6 import QtCore, QtGui, QtWidgets
+
+from . import medicine
+from . import reminders as rem
+from . import tts
+from .voice_client import VoiceEngine
+
+# ---------------- assets & palette ----------------
+_PKG_DIR = os.path.dirname(__file__)
+ASSET_DIR = (os.environ.get("PTALK_ASSETS")
+             or (os.path.join(os.path.dirname(_PKG_DIR), "assets")
+                 if os.path.isdir(os.path.join(os.path.dirname(_PKG_DIR), "assets"))
+                 else os.path.join(_PKG_DIR, "..", "assets_src")))
+
+ELDER_GRAD = ["#F0D8C8", "#F5E8E0", "#FFF3E8"]
+ACCENT = "#E67E22"
+ACCENT_DARK = "#D35400"
+EMERGENCY = "#D32F2F"
+GREEN_OK = "#2E7D32"
+GREETING = "#9E3F00"
+SUBGREET = "#A84A00"
+INK = "#2A2A2A"
+MUTED = "#707072"
+STAR_COLORS = ["#5EC99A", "#7DD9B0", "#A8E8CC", "#4DC990", "#6DCFAA", "#8FE0BF", "#3DAB7A"]
+WAVE_LAYERS = [("#4DC990", 2.0, 1.0, 1.00, 0.0, 70),
+               ("#7DD9B0", 3.0, 1.6, 0.65, 1.2, 55),
+               ("#A8E8CC", 1.4, 0.7, 0.80, 2.4, 40)]
+
+STATE_ASSET = {"idle": "char_idle.png", "recording": "char_listening.png",
+               "uploading": "char_thinking.png", "playing": "char_talking.png",
+               "error": "char_error.png"}
+STATUS_TEXT = {"idle": "Giữ nút để nói chuyện", "recording": "Đang nghe bạn nói...",
+               "uploading": "Đang xử lý...", "playing": "Đang trả lời...",
+               "error": "Có lỗi, thử lại nhé"}
+
+_FS = 1.15  # global font scale (set from config at startup)
+
+
+def H(pt, weight=QtGui.QFont.Weight.Bold):
+    f = QtGui.QFont("Noto Sans")
+    f.setPointSizeF(pt * _FS)
+    f.setWeight(weight)
+    return f
+
+
+def pill_button(text, bg, fg="white", pt=17, radius=26, min_h=64):
+    b = QtWidgets.QPushButton(text)
+    b.setFont(H(pt, QtGui.QFont.Weight.DemiBold))
+    b.setMinimumHeight(int(min_h))
+    b.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+    b.setStyleSheet(
+        f"QPushButton{{background:{bg};color:{fg};border:none;border-radius:{radius}px;"
+        f"padding:8px 22px;}} QPushButton:pressed{{background:{ACCENT_DARK};}}"
+        f" QPushButton:disabled{{background:#BBBBBB;}}")
+    return b
+
+
+# ======================================================================
+#  Starfield helpers
+# ======================================================================
+def _make_stars(n=45):
+    rng = random.Random(42)
+    return [{"x": rng.random(), "y": rng.random(), "size": 6 + rng.random() * 12,
+             "alpha": 80 + rng.random() * 140, "sx": (rng.random() - 0.5) * 0.0006,
+             "sy": (0.2 + rng.random() * 0.5) * 0.0006,
+             "tw": 0.025 + rng.random() * 0.05, "phase": rng.random() * math.pi * 2}
+            for _ in range(n)]
+
+
+def _star_path(cx, cy, outer):
+    inner = outer * 0.4
+    path = QtGui.QPainterPath()
+    for k in range(8):
+        r = outer if k % 2 == 0 else inner
+        a = math.pi / 2 * (k / 2)
+        p = QtCore.QPointF(cx + r * math.cos(a), cy + r * math.sin(a))
+        path.moveTo(p) if k == 0 else path.lineTo(p)
+    path.closeSubpath()
+    return path
+
+
+# ======================================================================
+#  Frosted glass panel
+# ======================================================================
+class Glass(QtWidgets.QFrame):
+    def __init__(self, radius=20, alpha=150, parent=None):
+        super().__init__(parent)
+        self._r, self._a = radius, alpha
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        r = QtCore.QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
+        p.setBrush(QtGui.QColor(255, 255, 255, self._a))
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 160), 1))
+        p.drawRoundedRect(r, self._r, self._r)
+        p.end()
+
+
+# ======================================================================
+#  Round icon button
+# ======================================================================
+class CircleButton(QtWidgets.QWidget):
+    pressedDown = QtCore.pyqtSignal()
+    releasedUp = QtCore.pyqtSignal()
+    clicked = QtCore.pyqtSignal()
+
+    def __init__(self, kind, color, diameter=84, hold=False, parent=None):
+        super().__init__(parent)
+        self.kind, self.color, self.d, self.hold = kind, QtGui.QColor(color), diameter, hold
+        self.pulsing = False
+        self._m = max(9, int(diameter * 0.20))
+        self.setFixedSize(diameter + 2 * self._m, diameter + 2 * self._m)
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+
+    def set_kind(self, kind, color):
+        self.kind, self.color = kind, QtGui.QColor(color); self.update()
+
+    def set_pulsing(self, on):
+        if on != self.pulsing:
+            self.pulsing = on; self.update()
+
+    def mousePressEvent(self, e):
+        if self.hold: self.pressedDown.emit()
+        self.update()
+
+    def mouseReleaseEvent(self, e):
+        if self.hold: self.releasedUp.emit()
+        else: self.clicked.emit()
+        self.update()
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        cx, cy = self.width() / 2, self.height() / 2
+        d = self.d + (6 if self.pulsing else 0)
+        glow_r = d / 2 + (18 if self.pulsing else 10)
+        grad = QtGui.QRadialGradient(cx, cy, glow_r)
+        c1 = QtGui.QColor(self.color); c1.setAlpha(120 if self.pulsing else 85)
+        c0 = QtGui.QColor(self.color); c0.setAlpha(0)
+        grad.setColorAt(0.55, c1); grad.setColorAt(1.0, c0)
+        p.setPen(QtCore.Qt.PenStyle.NoPen); p.setBrush(grad)
+        p.drawEllipse(QtCore.QPointF(cx, cy), glow_r, glow_r)
+        p.setBrush(self.color)
+        p.drawEllipse(QtCore.QPointF(cx, cy), d / 2, d / 2)
+        self._icon(p, cx, cy, d * 0.44)
+        p.end()
+
+    def _icon(self, p, cx, cy, s):
+        white = QtGui.QColor("white")
+        pen = QtGui.QPen(white, max(2.5, s * 0.12))
+        pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
+        k = self.kind
+        if k == "mic":
+            p.setPen(QtCore.Qt.PenStyle.NoPen); p.setBrush(white)
+            bw = s * 0.42
+            p.drawRoundedRect(QtCore.QRectF(cx - bw / 2, cy - s * 0.6, bw, s * 0.72), bw / 2, bw / 2)
+            p.setPen(pen); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            rr = s * 0.5
+            p.drawArc(QtCore.QRectF(cx - rr, cy - rr * 0.7, 2 * rr, 2 * rr), 200 * 16, 140 * 16)
+            p.drawLine(QtCore.QPointF(cx, cy + s * 0.32), QtCore.QPointF(cx, cy + s * 0.62))
+            p.drawLine(QtCore.QPointF(cx - s * 0.28, cy + s * 0.62), QtCore.QPointF(cx + s * 0.28, cy + s * 0.62))
+        elif k == "pill":
+            p.save(); p.translate(cx, cy); p.rotate(-45)
+            pw, ph = s * 1.5, s * 0.72
+            p.setPen(pen); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(QtCore.QRectF(-pw / 2, -ph / 2, pw, ph), ph / 2, ph / 2)
+            p.drawLine(QtCore.QPointF(0, -ph / 2), QtCore.QPointF(0, ph / 2))
+            p.restore()
+        elif k == "phone":
+            path = QtGui.QPainterPath()
+            path.moveTo(cx - s * 0.55, cy - s * 0.45)
+            path.quadTo(cx - s * 0.62, cy - s * 0.62, cx - s * 0.40, cy - s * 0.58)
+            path.lineTo(cx - s * 0.18, cy - s * 0.36)
+            path.quadTo(cx - s * 0.10, cy - s * 0.28, cx - s * 0.20, cy - s * 0.16)
+            path.quadTo(cx - s * 0.02, cy + s * 0.22, cx + s * 0.32, cy + s * 0.30)
+            path.quadTo(cx + s * 0.20, cy + s * 0.10, cx + s * 0.30, cy + s * 0.02)
+            path.quadTo(cx + s * 0.42, cy - s * 0.08, cx + s * 0.58, cy + s * 0.02)
+            path.quadTo(cx + s * 0.68, cy + s * 0.20, cx + s * 0.50, cy + s * 0.42)
+            path.quadTo(cx + s * 0.30, cy + s * 0.62, cx - s * 0.05, cy + s * 0.50)
+            path.quadTo(cx - s * 0.55, cy + s * 0.30, cx - s * 0.62, cy - s * 0.20)
+            path.quadTo(cx - s * 0.66, cy - s * 0.34, cx - s * 0.55, cy - s * 0.45)
+            p.setBrush(white); p.setPen(QtCore.Qt.PenStyle.NoPen); p.drawPath(path)
+        elif k == "close":
+            p.setPen(pen); o = s * 0.5
+            p.drawLine(QtCore.QPointF(cx - o, cy - o), QtCore.QPointF(cx + o, cy + o))
+            p.drawLine(QtCore.QPointF(cx - o, cy + o), QtCore.QPointF(cx + o, cy - o))
+        elif k == "bell":
+            p.setPen(pen); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            path = QtGui.QPainterPath()
+            path.moveTo(cx - s * 0.45, cy + s * 0.28)
+            path.quadTo(cx - s * 0.45, cy - s * 0.15, cx - s * 0.28, cy - s * 0.32)
+            path.quadTo(cx - s * 0.28, cy - s * 0.55, cx, cy - s * 0.55)
+            path.quadTo(cx + s * 0.28, cy - s * 0.55, cx + s * 0.28, cy - s * 0.32)
+            path.quadTo(cx + s * 0.45, cy - s * 0.15, cx + s * 0.45, cy + s * 0.28)
+            path.closeSubpath()
+            p.drawPath(path)
+            p.drawArc(QtCore.QRectF(cx - s * 0.14, cy + s * 0.28, s * 0.28, s * 0.28), 180 * 16, 180 * 16)
+        elif k == "rotate":
+            p.setPen(pen); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            p.drawArc(QtCore.QRectF(cx - s * 0.5, cy - s * 0.5, s, s), 40 * 16, 280 * 16)
+            ah = QtGui.QPainterPath()
+            tip = QtCore.QPointF(cx + s * 0.5 * math.cos(math.radians(-40)),
+                                 cy - s * 0.5 * math.sin(math.radians(-40)))
+            ah.moveTo(tip)
+            ah.lineTo(tip.x() - s * 0.24, tip.y() - s * 0.02)
+            ah.moveTo(tip)
+            ah.lineTo(tip.x() - s * 0.02, tip.y() + s * 0.26)
+            p.drawPath(ah)
+        elif k == "gear":
+            p.setPen(pen); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QtCore.QPointF(cx, cy), s * 0.34, s * 0.34)
+            for i in range(8):
+                a = math.pi / 4 * i
+                p.drawLine(QtCore.QPointF(cx + s * 0.42 * math.cos(a), cy + s * 0.42 * math.sin(a)),
+                           QtCore.QPointF(cx + s * 0.56 * math.cos(a), cy + s * 0.56 * math.sin(a)))
+        elif k == "back":
+            p.setPen(pen)
+            p.drawLine(QtCore.QPointF(cx + s * 0.25, cy - s * 0.45), QtCore.QPointF(cx - s * 0.3, cy))
+            p.drawLine(QtCore.QPointF(cx - s * 0.3, cy), QtCore.QPointF(cx + s * 0.25, cy + s * 0.45))
+
+
+class ActionButton(QtWidgets.QWidget):
+    """Round button + caption underneath (elderly-friendly)."""
+    def __init__(self, kind, color, caption, diameter=88, hold=False, parent=None):
+        super().__init__(parent)
+        lay = QtWidgets.QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(2)
+        lay.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter)
+        self.btn = CircleButton(kind, color, diameter, hold)
+        self.cap = QtWidgets.QLabel(caption)
+        self.cap.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.cap.setFont(H(12.5, QtGui.QFont.Weight.DemiBold))
+        self.cap.setStyleSheet(f"color:{ACCENT_DARK};")
+        lay.addWidget(self.btn, 0, QtCore.Qt.AlignmentFlag.AlignHCenter)
+        lay.addWidget(self.cap)
+
+    def set_caption(self, t): self.cap.setText(t)
+
+
+# ======================================================================
+#  Character + waveform stage
+# ======================================================================
+class Stage(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.state = "idle"
+        self._cache = {}
+        self._amp = 0.18
+
+    def _pix(self, st):
+        if st not in self._cache:
+            self._cache[st] = QtGui.QPixmap(os.path.join(ASSET_DIR, STATE_ASSET[st]))
+        return self._cache[st]
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        t = float(QtWidgets.QApplication.instance().property("anim_t") or 0.0)
+        band = min(240, h * 0.55); cy = h - band / 2
+        targ = {"idle": 0.16, "recording": 0.34, "uploading": 0.24, "playing": 0.46, "error": 0.08}
+        spd = {"idle": 0.5, "recording": 1.4, "uploading": 0.9, "playing": 2.0, "error": 0.3}
+        self._amp += (targ[self.state] - self._amp) * 0.06
+        speed = spd[self.state]
+        for color, freq, smul, amul, pshift, alpha in WAVE_LAYERS:
+            maxA = self._amp * band * amul; phase = t * 2 * math.pi * speed
+            path = QtGui.QPainterPath(); first = True; x = 0.0
+            while x <= w:
+                n = x / w if w else 0; env = math.sin(math.pi * n)
+                wv = maxA * env * (0.6 * math.sin(n * 2 * math.pi * freq + phase * smul + pshift)
+                                   + 0.4 * math.sin(n * 2 * math.pi * freq * 1.7 - phase * smul))
+                y = cy - wv
+                path.moveTo(x, y) if first else path.lineTo(x, y); first = False; x += 3
+            x = float(w)
+            while x >= 0:
+                n = x / w if w else 0; env = math.sin(math.pi * n)
+                wv = maxA * env * (0.6 * math.sin(n * 2 * math.pi * freq + phase * smul + pshift)
+                                   + 0.4 * math.sin(n * 2 * math.pi * freq * 1.7 - phase * smul))
+                path.lineTo(x, cy + wv); x -= 3
+            path.closeSubpath()
+            col = QtGui.QColor(color); col.setAlpha(alpha)
+            p.setPen(QtCore.Qt.PenStyle.NoPen); p.setBrush(col); p.drawPath(path)
+        pix = self._pix(self.state)
+        if not pix.isNull():
+            size = max(min(w * 0.8, h * 0.7, 340), 170)
+            v = abs(math.sin(t * math.pi / 0.9)); scale = dy = rot = 0.0; scale = 1.0
+            if self.state == "idle": scale, dy = 1 + 0.04 * v, -6 * v
+            elif self.state == "recording": scale, rot = 1 + 0.12 * v, (v - 0.5) * 0.10
+            elif self.state == "uploading": scale, dy = 1 + 0.06 * v, -8 * v
+            elif self.state == "playing": dy, scale = -14 * v, 1 + 0.05 * v
+            elif self.state == "error": rot = math.sin(v * math.pi * 4) * 0.08
+            draw = int(size * scale)
+            sc = pix.scaled(draw, draw, QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                            QtCore.Qt.TransformationMode.SmoothTransformation)
+            p.save(); p.translate(w / 2, h * 0.44 + dy); p.rotate(math.degrees(rot))
+            p.drawPixmap(int(-sc.width() / 2), int(-sc.height() / 2), sc); p.restore()
+        p.end()
+
+
+WEEKDAYS = ["Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy", "Chủ Nhật"]
+
+
+class InfoPanel(Glass):
+    """Khung mờ hội thoại. Rảnh: hiển thị ngày·giờ·lịch sắp tới (trả lời 'hôm
+    nay ngày nào / mấy giờ / lịch gì'). Tương tác: đổi sang trạng thái hội
+    thoại rồi tự quay lại bình thường."""
+
+    def __init__(self, app):
+        super().__init__(radius=22, alpha=170)
+        self.app = app
+        self.mode = "idle"
+        self._last_min = -1
+        self.setMinimumHeight(int(112 + 56 * _FS))
+        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
+                           QtWidgets.QSizePolicy.Policy.Fixed)
+        v = QtWidgets.QVBoxLayout(self)
+        v.setContentsMargins(24, 14, 24, 14); v.setSpacing(6)
+        v.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.l1 = QtWidgets.QLabel("")
+        self.l1.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.l1.setWordWrap(True)
+        self.l1.setFont(H(19, QtGui.QFont.Weight.ExtraBold)); self.l1.setStyleSheet(f"color:{ACCENT_DARK};")
+        self.l2 = QtWidgets.QLabel("")
+        self.l2.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.l2.setWordWrap(True)
+        self.l2.setFont(H(16, QtGui.QFont.Weight.DemiBold)); self.l2.setStyleSheet(f"color:{GREETING};")
+        self.l3 = QtWidgets.QLabel("")
+        self.l3.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.l3.setWordWrap(True)
+        self.l3.setFont(H(15)); self.l3.setStyleSheet(f"color:{INK};")
+        v.addWidget(self.l1); v.addWidget(self.l2); v.addWidget(self.l3)
+        self.refresh()
+
+    def _next_reminder(self):
+        items = [r for r in self.app.store.items if r.enabled]
+        if not items:
+            return None
+        now = time.strftime("%H:%M")
+        after = sorted((r for r in items if r.time >= now), key=lambda r: r.time)
+        return after[0] if after else sorted(items, key=lambda r: r.time)[0]
+
+    def set_state(self, st):
+        self.mode = st
+        self._last_min = -1
+        self.refresh()
+
+    def show_message(self, text):
+        self.mode = "msg"
+        self.l1.setText(text); self.l2.setText(""); self.l3.setText("")
+
+    def show_chat(self, title, text):
+        """Hiển thị hội thoại: dòng tiêu đề (Bà vừa nói / Ngân) + nội dung."""
+        self.mode = "chat"
+        self.l1.setText(title)
+        self.l2.setText(text or "")
+        self.l3.setText("")
+
+    def tick(self):
+        if self.mode == "idle" and time.localtime().tm_min != self._last_min:
+            self.refresh()
+
+    def refresh(self):
+        msgs = {"recording": "Bác cứ nói, tôi đang nghe...",
+                "uploading": "Tôi đang suy nghĩ...",
+                "playing": "Tôi đang trả lời bác...",
+                "error": "Có lỗi nhỏ, bác thử lại nhé"}
+        if self.mode in msgs:
+            self.l1.setText(msgs[self.mode]); self.l2.setText(""); self.l3.setText("")
+            return
+        lt = time.localtime(); self._last_min = lt.tm_min
+        self.l1.setText("Hôm nay: %s" % WEEKDAYS[lt.tm_wday])
+        self.l2.setText("Ngày %02d/%02d/%d" % (lt.tm_mday, lt.tm_mon, lt.tm_year))
+        nr = self._next_reminder()
+        self.l3.setText(("Sắp tới: %s · %s" % (nr.time, nr.label)) if nr
+                        else "Hôm nay chưa có lịch nhắc")
+
+
+# ======================================================================
+#  Home screen (voice)
+# ======================================================================
+class HomeScreen(QtWidgets.QWidget):
+    def __init__(self, app):
+        super().__init__()
+        self.app = app
+        self.state = "idle"
+        self._chat_a = ""      # câu trả lời gần nhất của Ngân (giữ hiển thị khi đang đọc)
+        self._build()
+
+    def _build(self):
+        # top bar
+        self.topbar = Glass(radius=18, alpha=150); self.topbar.setFixedHeight(60)
+        tl = QtWidgets.QHBoxLayout(self.topbar); tl.setContentsMargins(16, 4, 10, 4)
+        self.clock = QtWidgets.QLabel("--:--")
+        self.clock.setFont(H(20, QtGui.QFont.Weight.ExtraBold))
+        self.clock.setStyleSheet(f"color:{ACCENT_DARK};")
+        tl.addWidget(self.clock)
+        self.brand = QtWidgets.QLabel("Elder Care")
+        self.brand.setFont(H(16, QtGui.QFont.Weight.ExtraBold))
+        self.brand.setStyleSheet(f"color:{ACCENT_DARK};")
+        self.brand.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        tl.addWidget(self.brand, 1)
+        for kind, cb in (("bell", lambda: self.app.navigate("reminders")),
+                         ("rotate", self.app.rotate_90),
+                         ("gear", lambda: self.app.navigate("settings"))):
+            b = CircleButton(kind, ACCENT, 40); b.clicked.connect(cb)
+            tl.addWidget(b, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+
+        # stage (character + waveform)
+        self.stage = Stage(self)
+
+        # conversation / info panel (thay greeting + status chip)
+        self.info = InfoPanel(self.app)
+
+        # action buttons
+        self.a_med = ActionButton("pill", ACCENT, "Quét thuốc", 78)
+        self.a_med.btn.clicked.connect(self.app.scan_medicine)
+        self.a_mic = ActionButton("mic", ACCENT, "Giữ để nói", 96, hold=True)
+        self.a_mic.btn.pressedDown.connect(self._mic_down)
+        self.a_mic.btn.releasedUp.connect(self._mic_up)
+        self.a_phone = ActionButton("phone", EMERGENCY, "Gọi khẩn cấp", 78)
+        self.a_phone.btn.clicked.connect(self.app.emergency_call)
+
+        self._outer = QtWidgets.QVBoxLayout(self)
+        self._outer.setContentsMargins(16, 14, 16, 18)
+        self.apply_orientation(self.width() > self.height())
+
+    def _clear_layout(self, lay):
+        while lay.count():
+            it = lay.takeAt(0)
+            if it.widget():
+                it.widget().setParent(None)
+            elif it.layout():
+                self._clear_layout(it.layout())
+
+    def _btn_row(self):
+        row = QtWidgets.QHBoxLayout(); row.setSpacing(0)
+        row.addStretch(2)
+        row.addWidget(self.a_med, 0, QtCore.Qt.AlignmentFlag.AlignBottom)
+        row.addStretch(3)
+        row.addWidget(self.a_mic, 0, QtCore.Qt.AlignmentFlag.AlignBottom)
+        row.addStretch(3)
+        row.addWidget(self.a_phone, 0, QtCore.Qt.AlignmentFlag.AlignBottom)
+        row.addStretch(2)
+        return row
+
+    def apply_orientation(self, landscape):
+        self._clear_layout(self._outer)
+        for w in (self.topbar, self.stage, self.info,
+                  self.a_med, self.a_mic, self.a_phone):
+            w.setParent(self); w.show()
+        self._outer.addWidget(self.topbar)
+        if landscape:
+            self._outer.addSpacing(6)
+            mid = QtWidgets.QHBoxLayout()
+            mid.addWidget(self.stage, 3)
+            right = QtWidgets.QVBoxLayout()
+            right.addStretch(); right.addWidget(self.info)
+            right.addSpacing(18); right.addLayout(self._btn_row()); right.addStretch()
+            mid.addLayout(right, 2)
+            self._outer.addLayout(mid, 1)
+        else:
+            self._outer.addSpacing(6)
+            self._outer.addWidget(self.stage, 1)
+            self._outer.addWidget(self.info)
+            self._outer.addSpacing(16)
+            self._outer.addLayout(self._btn_row())
+            self._outer.addSpacing(8)
+
+    def resizeEvent(self, e):
+        land = self.width() > self.height()
+        if getattr(self, "_land", None) != land:
+            self._land = land
+            self.apply_orientation(land)
+        super().resizeEvent(e)
+
+    def tick_clock(self):
+        self.clock.setText(time.strftime("%H:%M"))
+        self.info.tick()
+
+    def _set_state(self, st):
+        self.state = st; self.stage.state = st
+        self.info.set_state(st)
+        self.a_mic.btn.set_pulsing(st == "recording")
+        if st == "playing":
+            self.a_mic.btn.set_kind("close", EMERGENCY); self.a_mic.btn.hold = False
+            self.a_mic.set_caption("Dừng")
+        else:
+            self.a_mic.btn.set_kind("mic", ACCENT_DARK if st == "recording" else ACCENT)
+            self.a_mic.btn.hold = True; self.a_mic.set_caption("Giữ để nói")
+        if st == "error":
+            QtCore.QTimer.singleShot(
+                3000, lambda: self._set_state("idle") if self.state == "error" else None)
+
+    def apply_voice_event(self, ev):
+        U = ev.upper()
+        if U in ("PROCESSING", "THINKING", "00"): self._set_state("uploading")
+        elif U == "SPEAKING":
+            self._set_state("playing")
+            if self._chat_a:                     # giữ lời của Ngân trên khung, đừng đè bằng câu chung
+                self.info.show_chat("Ngân", self._chat_a)
+        elif U in ("IDLE", "PLAYBACK_DONE", "CANCELLED", "CONNECTED"):
+            self._chat_a = ""; self._set_state("idle")
+        elif U == "DISCONNECTED": self.info.show_message("Mất kết nối — đang kết nối lại...")
+        elif U.startswith("ERR"): self._set_state("error")
+
+    def on_transcript(self, text):
+        """Server nghe được bà nói gì (khung chat)."""
+        self._chat_a = ""
+        self.info.show_chat("Bà vừa nói", text)
+
+    def on_answer(self, text):
+        """Câu trả lời (chữ) của Ngân — hiển thị song song với giọng đọc."""
+        self._chat_a = text
+        self.info.show_chat("Ngân", text)
+
+    def set_status(self, text):
+        self.info.show_message(text)
+
+    def _mic_down(self):
+        if self.state == "playing":
+            self.app.engine.cancel(); self._set_state("idle"); return
+        self._set_state("recording"); self.app.engine.talk_start()
+
+    def _mic_up(self):
+        if self.state == "recording":
+            self.app.engine.talk_stop()
+
+
+# ======================================================================
+#  Simple screen scaffold (header with back + title)
+# ======================================================================
+class SubScreen(QtWidgets.QWidget):
+    def __init__(self, app, title):
+        super().__init__()
+        self.app = app
+        self.root = QtWidgets.QVBoxLayout(self)
+        self.root.setContentsMargins(16, 14, 16, 18); self.root.setSpacing(12)
+        head = QtWidgets.QHBoxLayout()
+        back = CircleButton("back", ACCENT, 46); back.clicked.connect(lambda: app.navigate("home"))
+        head.addWidget(back)
+        lbl = QtWidgets.QLabel(title); lbl.setFont(H(21, QtGui.QFont.Weight.ExtraBold))
+        lbl.setStyleSheet(f"color:{ACCENT_DARK};")
+        head.addWidget(lbl); head.addStretch()
+        self.root.addLayout(head)
+
+
+# ======================================================================
+#  Medicine result screen
+# ======================================================================
+class MedicineScreen(SubScreen):
+    def __init__(self, app):
+        super().__init__(app, "Thông tin thuốc")
+        self.card = Glass(radius=22, alpha=225)
+        cl = QtWidgets.QVBoxLayout(self.card); cl.setContentsMargins(6, 6, 6, 6)
+        self.scroll = QtWidgets.QScrollArea(); self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.scroll.setStyleSheet("background:transparent;")
+        self.text = QtWidgets.QLabel("—")
+        self.text.setWordWrap(True); self.text.setFont(H(17))
+        self.text.setStyleSheet(f"color:{INK}; padding:14px;")
+        self.text.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop | QtCore.Qt.AlignmentFlag.AlignLeft)
+        self.text.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.scroll.setWidget(self.text)
+        cl.addWidget(self.scroll)
+        self.root.addWidget(self.card, 1)
+        close = pill_button("✕  Đóng", ACCENT, min_h=68, pt=18)
+        close.clicked.connect(lambda: self.app.navigate("home"))
+        self.root.addWidget(close)
+
+    def set_result(self, txt):
+        self.text.setText(txt)
+        self.scroll.verticalScrollBar().setValue(0)
+
+
+# ======================================================================
+#  Reminders list screen
+# ======================================================================
+class RemindersScreen(SubScreen):
+    def __init__(self, app):
+        super().__init__(app, "Nhắc lịch · uống thuốc")
+        self.scroll = QtWidgets.QScrollArea(); self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.scroll.setStyleSheet("background:transparent;")
+        self.holder = QtWidgets.QWidget(); self.holder.setStyleSheet("background:transparent;")
+        self.vlist = QtWidgets.QVBoxLayout(self.holder); self.vlist.setSpacing(10)
+        self.vlist.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
+        self.scroll.setWidget(self.holder)
+        self.root.addWidget(self.scroll, 1)
+        add = pill_button("➕  Thêm nhắc mới", GREEN_OK, min_h=72, pt=19)
+        add.clicked.connect(lambda: self.app.navigate("add"))
+        self.root.addWidget(add)
+
+    def refresh(self):
+        while self.vlist.count():
+            it = self.vlist.takeAt(0)
+            if it.widget(): it.widget().setParent(None)
+        items = self.app.store.items
+        if not items:
+            empty = QtWidgets.QLabel("Chưa có lời nhắc nào.\nBấm “Thêm nhắc mới” để tạo.")
+            empty.setFont(H(16)); empty.setStyleSheet(f"color:{MUTED};")
+            empty.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self.vlist.addWidget(empty); return
+        for r in items:
+            self.vlist.addWidget(self._row(r))
+
+    def _row(self, r):
+        card = Glass(radius=18, alpha=230); card.setMinimumHeight(84)
+        h = QtWidgets.QHBoxLayout(card); h.setContentsMargins(18, 8, 12, 8); h.setSpacing(12)
+        tlbl = QtWidgets.QLabel(r.time); tlbl.setFont(H(26, QtGui.QFont.Weight.ExtraBold))
+        tlbl.setStyleSheet(f"color:{ACCENT_DARK if r.enabled else MUTED};")
+        h.addWidget(tlbl)
+        col = QtWidgets.QVBoxLayout(); col.setSpacing(0)
+        name = QtWidgets.QLabel(r.label)
+        name.setFont(H(16, QtGui.QFont.Weight.DemiBold))
+        name.setStyleSheet(f"color:{INK if r.enabled else MUTED};")
+        kind_txt = "Uống thuốc" if r.kind == "med" else "Lịch hẹn"
+        sub = QtWidgets.QLabel(kind_txt + (" · Hằng ngày" if not r.days else " · Theo ngày"))
+        sub.setFont(H(12)); sub.setStyleSheet(f"color:{MUTED};")
+        col.addWidget(name); col.addWidget(sub)
+        h.addLayout(col, 1)
+        onoff = pill_button("Bật" if r.enabled else "Tắt",
+                            GREEN_OK if r.enabled else "#9E9E9E", min_h=48, pt=14, radius=22)
+        onoff.setFixedWidth(78)
+        onoff.clicked.connect(lambda _, rid=r.id: (self.app.store.toggle(rid), self.refresh()))
+        h.addWidget(onoff)
+        dele = CircleButton("close", EMERGENCY, 40)
+        dele.clicked.connect(lambda rid=r.id: (self.app.store.remove(rid), self.refresh()))
+        h.addWidget(dele)
+        return card
+
+
+# ======================================================================
+#  Add reminder screen
+# ======================================================================
+class AddReminderScreen(SubScreen):
+    PRESETS = ["Thuốc huyết áp", "Thuốc tiểu đường", "Thuốc tim", "Vitamin", "Thuốc dạ dày"]
+
+    def __init__(self, app):
+        super().__init__(app, "Thêm nhắc")
+        self.hh, self.mm, self.kind = 7, 0, "med"
+
+        # time steppers
+        trow = QtWidgets.QHBoxLayout(); trow.setSpacing(18)
+        trow.addStretch()
+        self.h_lbl = self._stepper(trow, "Giờ", lambda d: self._adj("h", d))
+        colon = QtWidgets.QLabel(":"); colon.setFont(H(40, QtGui.QFont.Weight.ExtraBold))
+        colon.setStyleSheet(f"color:{ACCENT_DARK};"); trow.addWidget(colon)
+        self.m_lbl = self._stepper(trow, "Phút", lambda d: self._adj("m", d))
+        trow.addStretch()
+        self.root.addLayout(trow)
+
+        # kind toggle
+        krow = QtWidgets.QHBoxLayout(); krow.setSpacing(12)
+        self.b_med = pill_button("Uống thuốc", ACCENT, min_h=64, pt=17)
+        self.b_appt = pill_button("Lịch hẹn", "#9E9E9E", min_h=64, pt=17)
+        self.b_med.clicked.connect(lambda: self._set_kind("med"))
+        self.b_appt.clicked.connect(lambda: self._set_kind("appt"))
+        krow.addWidget(self.b_med); krow.addWidget(self.b_appt)
+        self.root.addLayout(krow)
+
+        # label
+        lab = QtWidgets.QLabel("Tên (bấm gợi ý hoặc gõ):")
+        lab.setFont(H(15, QtGui.QFont.Weight.DemiBold)); lab.setStyleSheet(f"color:{INK};")
+        self.root.addWidget(lab)
+        self.name = QtWidgets.QLineEdit("Thuốc huyết áp")
+        self.name.setFont(H(18)); self.name.setMinimumHeight(58)
+        self.name.setStyleSheet("QLineEdit{background:white;border:2px solid #E0C0A8;"
+                                "border-radius:14px;padding:6px 14px;color:#2A2A2A;}")
+        self.root.addWidget(self.name)
+        chips = QtWidgets.QHBoxLayout(); chips.setSpacing(8)
+        for psname in self.PRESETS:
+            c = pill_button(psname, "#F0D8C8", fg=ACCENT_DARK, min_h=44, pt=13, radius=20)
+            c.clicked.connect(lambda _, n=psname: self.name.setText(n))
+            chips.addWidget(c)
+        chips.addStretch()
+        self.root.addLayout(chips)
+        self.root.addStretch()
+
+        save = pill_button("✓  Lưu lời nhắc", GREEN_OK, min_h=74, pt=20)
+        save.clicked.connect(self._save)
+        self.root.addWidget(save)
+        self._update()
+
+    def _stepper(self, parent, cap, cb):
+        box = QtWidgets.QVBoxLayout(); box.setSpacing(4); box.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter)
+        up = pill_button("▲", ACCENT, min_h=54, pt=18, radius=18); up.setFixedWidth(96)
+        up.clicked.connect(lambda: cb(+1))
+        val = QtWidgets.QLabel("00"); val.setFont(H(46, QtGui.QFont.Weight.ExtraBold))
+        val.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter); val.setStyleSheet(f"color:{INK};")
+        val.setFixedWidth(96)
+        dn = pill_button("▼", ACCENT, min_h=54, pt=18, radius=18); dn.setFixedWidth(96)
+        dn.clicked.connect(lambda: cb(-1))
+        cl = QtWidgets.QLabel(cap); cl.setFont(H(12)); cl.setStyleSheet(f"color:{MUTED};")
+        cl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        box.addWidget(up); box.addWidget(val); box.addWidget(dn); box.addWidget(cl)
+        parent.addLayout(box)
+        return val
+
+    def _adj(self, which, d):
+        if which == "h": self.hh = (self.hh + d) % 24
+        else: self.mm = (self.mm + d * 5) % 60
+        self._update()
+
+    def _set_kind(self, k):
+        self.kind = k
+        self.b_med.setStyleSheet(self.b_med.styleSheet())
+        self.b_med.setStyleSheet(
+            f"QPushButton{{background:{ACCENT if k=='med' else '#BFBFBF'};color:white;"
+            "border:none;border-radius:26px;padding:8px 22px;}")
+        self.b_appt.setStyleSheet(
+            f"QPushButton{{background:{ACCENT if k=='appt' else '#BFBFBF'};color:white;"
+            "border:none;border-radius:26px;padding:8px 22px;}")
+
+    def _update(self):
+        self.h_lbl.setText("%02d" % self.hh); self.m_lbl.setText("%02d" % self.mm)
+
+    def reset(self):
+        self.hh, self.mm = 7, 0; self._set_kind("med")
+        self.name.setText("Thuốc huyết áp"); self._update()
+
+    def _save(self):
+        label = self.name.text().strip() or "Uống thuốc"
+        self.app.store.add("%02d:%02d" % (self.hh, self.mm), label, self.kind)
+        self.app.navigate("reminders")
+
+
+# ======================================================================
+#  Settings screen
+# ======================================================================
+class SettingsScreen(SubScreen):
+    def __init__(self, app):
+        super().__init__(app, "Cài đặt")
+        # font size
+        self.root.addWidget(self._section("Cỡ chữ"))
+        frow = QtWidgets.QHBoxLayout(); frow.setSpacing(12)
+        minus = pill_button("A−", ACCENT, min_h=70, pt=24); minus.clicked.connect(lambda: app.change_font(-0.1))
+        self.fs_lbl = QtWidgets.QLabel(); self.fs_lbl.setFont(H(18, QtGui.QFont.Weight.DemiBold))
+        self.fs_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter); self.fs_lbl.setStyleSheet(f"color:{INK};")
+        plus = pill_button("A+", ACCENT, min_h=70, pt=24); plus.clicked.connect(lambda: app.change_font(+0.1))
+        frow.addWidget(minus); frow.addWidget(self.fs_lbl, 1); frow.addWidget(plus)
+        self.root.addLayout(frow)
+        # orientation
+        self.root.addWidget(self._section("Hướng màn hình"))
+        orow = QtWidgets.QHBoxLayout(); orow.setSpacing(12)
+        p = pill_button("Dọc", ACCENT, min_h=64, pt=16); p.clicked.connect(lambda: app.set_rotation(0))
+        l = pill_button("Ngang", ACCENT, min_h=64, pt=16); l.clicked.connect(lambda: app.set_rotation(90))
+        r90 = pill_button("Xoay 90°", GREEN_OK, min_h=64, pt=16); r90.clicked.connect(app.rotate_90)
+        orow.addWidget(p); orow.addWidget(l); orow.addWidget(r90)
+        self.root.addLayout(orow)
+        # emergency
+        self.root.addWidget(self._section("Số gọi khẩn cấp"))
+        self.em_lbl = QtWidgets.QLabel(); self.em_lbl.setFont(H(22, QtGui.QFont.Weight.ExtraBold))
+        self.em_lbl.setStyleSheet(f"color:{EMERGENCY};")
+        self.root.addWidget(self.em_lbl)
+        self.root.addStretch()
+
+    def _section(self, t):
+        l = QtWidgets.QLabel(t); l.setFont(H(15, QtGui.QFont.Weight.DemiBold))
+        l.setStyleSheet(f"color:{MUTED};"); return l
+
+    def refresh(self):
+        self.fs_lbl.setText("Chữ ×%.2f" % _FS)
+        self.em_lbl.setText(self.app.cfg.get("emergency", {}).get("number", "115"))
+
+
+# ======================================================================
+#  Fullscreen medication alarm
+# ======================================================================
+class AlarmOverlay(QtWidgets.QWidget):
+    def __init__(self, app):
+        super().__init__(app)
+        self.app = app
+        self.setStyleSheet("background:#FFF3E0;")
+        self.setVisible(False)
+        v = QtWidgets.QVBoxLayout(self); v.setContentsMargins(30, 30, 30, 30); v.setSpacing(16)
+        v.addStretch()
+        self.icon = CircleButton("bell", ACCENT, 120); self.icon.setEnabled(False)
+        v.addWidget(self.icon, 0, QtCore.Qt.AlignmentFlag.AlignHCenter)
+        self.title = QtWidgets.QLabel("ĐẾN GIỜ UỐNG THUỐC")
+        self.title.setFont(H(28, QtGui.QFont.Weight.ExtraBold)); self.title.setStyleSheet(f"color:{ACCENT_DARK};")
+        self.title.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter); self.title.setWordWrap(True)
+        v.addWidget(self.title)
+        self.name = QtWidgets.QLabel("—")
+        self.name.setFont(H(34, QtGui.QFont.Weight.ExtraBold)); self.name.setStyleSheet(f"color:{INK};")
+        self.name.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter); self.name.setWordWrap(True)
+        v.addWidget(self.name)
+        self.tm = QtWidgets.QLabel("")
+        self.tm.setFont(H(20)); self.tm.setStyleSheet(f"color:{MUTED};")
+        self.tm.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(self.tm)
+        v.addStretch()
+        done = pill_button("✓  Đã uống", GREEN_OK, min_h=90, pt=24); done.clicked.connect(self._done)
+        snooze = pill_button("Nhắc lại sau 10 phút", ACCENT, min_h=78, pt=20); snooze.clicked.connect(self._snooze)
+        v.addWidget(done); v.addWidget(snooze)
+        self._current = None
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        grad = QtGui.QLinearGradient(0, 0, 0, self.height())
+        grad.setColorAt(0.0, QtGui.QColor("#FFE0B2"))
+        grad.setColorAt(1.0, QtGui.QColor("#FFF3E0"))
+        p.fillRect(self.rect(), grad)
+        p.end()
+
+    def show_for(self, r):
+        self._current = r
+        self.title.setText("ĐẾN GIỜ UỐNG THUỐC" if r.kind == "med" else "ĐẾN GIỜ HẸN")
+        self.name.setText(r.label); self.tm.setText("Lúc " + r.time)
+        self.setGeometry(self.app.rect()); self.setVisible(True); self.raise_()
+
+    def _done(self):
+        self.setVisible(False)
+
+    def _snooze(self):
+        if self._current:
+            self.app.snooze(self._current, 600)
+        self.setVisible(False)
+
+
+# ======================================================================
+#  Root app window
+# ======================================================================
+class MainWindow(QtWidgets.QWidget):
+    def __init__(self, cfg, start_engine=True, preview_state=None, preview_screen=None):
+        super().__init__()
+        global _FS
+        _FS = float(cfg["ui"].get("font_scale", 1.15))
+        self.cfg = cfg
+        self.setWindowTitle("PTalk Signature — Elder Care")
+        self._stars = _make_stars()
+        self._elapsed = QtCore.QElapsedTimer(); self._elapsed.start()
+        self.store = rem.ReminderStore()
+        self._fired = set(); self._snoozes = []
+
+        self._bridge = QtCore.QObject()
+        self._sig = _EventSignal(); self._sig.event.connect(self._on_event)
+        self.engine = VoiceEngine(cfg, on_event=lambda e: self._sig.event.emit(e))
+        if start_engine:
+            self.engine.start()
+
+        self.stack = QtWidgets.QStackedWidget(self)
+        self.stack.setStyleSheet("background:transparent;")
+        self.home = HomeScreen(self)
+        self.med = MedicineScreen(self)
+        self.reminders = RemindersScreen(self)
+        self.addrem = AddReminderScreen(self)
+        self.settings = SettingsScreen(self)
+        for s in (self.home, self.med, self.reminders, self.addrem, self.settings):
+            s.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+            self.stack.addWidget(s)
+        self.alarm = AlarmOverlay(self)
+
+        lay = QtWidgets.QVBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.stack)
+
+        self._timer = QtCore.QTimer(self); self._timer.timeout.connect(self._tick); self._timer.start(33)
+        self._sched = QtCore.QTimer(self); self._sched.timeout.connect(self._check_reminders); self._sched.start(15000)
+
+        if start_engine:
+            _apply_rotation(self._out(), int(self.cfg["ui"].get("rotation", 0)))
+
+        if preview_state:
+            self.home._set_state(preview_state)
+        if preview_screen:
+            self.navigate(preview_screen)
+
+    # ---------- navigation ----------
+    def navigate(self, name):
+        target = {"home": self.home, "medicine": self.med, "reminders": self.reminders,
+                  "add": self.addrem, "settings": self.settings}.get(name, self.home)
+        if name == "reminders": self.reminders.refresh()
+        if name == "add": self.addrem.reset()
+        if name == "settings": self.settings.refresh()
+        if name == "home": self.home.info.set_state(self.home.state)
+        self.stack.setCurrentWidget(target)
+
+    # ---------- background ----------
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        grad = QtGui.QLinearGradient(0, 0, 0, h)
+        grad.setColorAt(0.0, QtGui.QColor(ELDER_GRAD[0]))
+        grad.setColorAt(0.5, QtGui.QColor(ELDER_GRAD[1]))
+        grad.setColorAt(1.0, QtGui.QColor(ELDER_GRAD[2]))
+        p.fillRect(self.rect(), grad)
+        frame = self._elapsed.elapsed() / 1000.0 * 60.0
+        for i, s in enumerate(self._stars):
+            px = (s["x"] + s["sx"] * frame) % 1.0; py = (s["y"] + s["sy"] * frame) % 1.0
+            tw = (math.sin(s["phase"] + frame * s["tw"]) + 1) / 2
+            a = int(max(0, min(255, s["alpha"] * (0.4 + 0.6 * tw))))
+            col = QtGui.QColor(STAR_COLORS[i % len(STAR_COLORS)]); col.setAlpha(a)
+            p.setPen(QtCore.Qt.PenStyle.NoPen); p.setBrush(col)
+            p.drawPath(_star_path(px * w, py * h, s["size"]))
+        p.end()
+
+    def _tick(self):
+        QtWidgets.QApplication.instance().setProperty("anim_t", self._elapsed.elapsed() / 1000.0)
+        self.home.tick_clock()
+        self.update()
+        if self.stack.currentWidget() is self.home:
+            self.home.stage.update()
+
+    def resizeEvent(self, e):
+        self.alarm.setGeometry(self.rect())
+        super().resizeEvent(e)
+
+    # ---------- voice / medicine events ----------
+    def _on_event(self, ev):
+        if ev.startswith("MED_STATUS:"):
+            self.home.set_status(ev[len("MED_STATUS:"):]); return
+        if ev.startswith("MED_RESULT:"):
+            self.med.set_result(ev[len("MED_RESULT:"):]); self.navigate("medicine")
+            self.home.a_med.btn.setEnabled(True); self.home._set_state("idle"); return
+        if ev.startswith("CHAT_T:"):
+            self.home.on_transcript(ev[len("CHAT_T:"):]); return
+        if ev.startswith("CHAT_A:"):
+            self.home.on_answer(ev[len("CHAT_A:"):]); return
+        self.home.apply_voice_event(ev)
+
+    def scan_medicine(self):
+        self.home.a_med.btn.setEnabled(False)
+        self.home.set_status("Đang chụp ảnh thuốc...")
+        threading.Thread(target=self._scan_worker, daemon=True).start()
+
+    def _scan_worker(self):
+        try:
+            path = "/tmp/ptalk_medicine.jpg"
+            medicine.capture_jpeg(path, self.cfg["camera"]["rotation"])
+            self._sig.event.emit("MED_STATUS:Đang phân tích thuốc...")
+            txt = medicine.analyze_medicine(path, self.cfg["server"]["aitools_url"])
+            self._sig.event.emit("MED_RESULT:" + (txt or "Không nhận diện được thuốc."))
+        except Exception as e:
+            self._sig.event.emit("MED_RESULT:Lỗi khi quét thuốc: %s" % e)
+
+    def emergency_call(self):
+        num = self.cfg.get("emergency", {}).get("number", "115")
+        tts.speak("Đang gọi khẩn cấp")
+        box = QtWidgets.QMessageBox(self)
+        box.setStyleSheet("QLabel{font-size:22px;} QPushButton{font-size:18px;padding:10px 24px;}")
+        box.setWindowTitle("Gọi khẩn cấp")
+        box.setText(f"Đang gọi số khẩn cấp:\n\n{num}")
+        box.exec()
+
+    # ---------- reminders ----------
+    def _check_reminders(self):
+        now = time.time()
+        for r in self.store.due_now(now):
+            key = r.id + time.strftime("@%Y%m%d%H%M", time.localtime(now))
+            if key in self._fired:
+                continue
+            self._fired.add(key); self._fire(r)
+        for item in list(self._snoozes):
+            if now >= item[0]:
+                self._snoozes.remove(item); self._fire(item[1])
+
+    def _fire(self, r):
+        tts.chime()
+        msg = ("Đã đến giờ uống thuốc. " + r.label) if r.kind == "med" else ("Đã đến giờ hẹn. " + r.label)
+        tts.speak(msg)
+        self.alarm.show_for(r)
+
+    def snooze(self, r, seconds):
+        self._snoozes.append((time.time() + seconds, r))
+
+    # ---------- settings actions ----------
+    def change_font(self, delta):
+        global _FS
+        _FS = max(0.9, min(1.8, round(_FS + delta, 2)))
+        self.cfg.save_user("ui", {"font_scale": _FS})
+        self._rebuild_screens()
+        self.navigate("settings")
+
+    def _out(self):
+        return self.cfg.get("display", {}).get("output", "DSI-2")
+
+    def rotate_90(self):
+        """Xoay màn hình thêm 90° mỗi lần bấm: 0 → 90 → 180 → 270 → 0."""
+        deg = (int(self.cfg["ui"].get("rotation", 0)) + 90) % 360
+        self.cfg.save_user("ui", {"rotation": deg})
+        _apply_rotation(self._out(), deg)
+
+    def set_rotation(self, deg):
+        deg = int(deg) % 360
+        self.cfg.save_user("ui", {"rotation": deg})
+        _apply_rotation(self._out(), deg)
+
+    def _rebuild_screens(self):
+        cur = self.stack.currentIndex()
+        old = [self.home, self.med, self.reminders, self.addrem, self.settings]
+        self.home = HomeScreen(self); self.med = MedicineScreen(self)
+        self.reminders = RemindersScreen(self); self.addrem = AddReminderScreen(self)
+        self.settings = SettingsScreen(self)
+        for s in (self.home, self.med, self.reminders, self.addrem, self.settings):
+            s.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
+            self.stack.addWidget(s)
+        for s in old:
+            self.stack.removeWidget(s); s.setParent(None)
+        self.stack.setCurrentIndex(min(cur, self.stack.count() - 1))
+
+    def closeEvent(self, e):
+        try: self.engine.shutdown()
+        except Exception: pass
+        super().closeEvent(e)
+
+
+class _EventSignal(QtCore.QObject):
+    event = QtCore.pyqtSignal(str)
+
+
+_TRANSFORMS = {0: "normal", 90: "90", 180: "180", 270: "270"}
+
+
+def _apply_rotation(output, deg):
+    """Rotate the physical DSI output via wlr-randr (labwc/cage/wlroots)."""
+    transform = _TRANSFORMS.get(int(deg) % 360, "normal")
+    try:
+        subprocess.run(["wlr-randr", "--output", output, "--transform", transform],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+    except Exception:
+        pass

@@ -1,0 +1,14 @@
+Package: ptalk-signature-native
+Version: 0.4.0
+Architecture: all
+Maintainer: CTS Lab <maintainer@example.com>
+Section: sound
+Priority: optional
+Depends: python3 (>= 3.11), python3-picamera2, python3-libcamera, python3-requests, python3-websockets, libopus0, alsa-utils, python3-pyqt6
+Recommends: qt6-wayland, fonts-noto-core, cage, pipewire-alsa, espeak-ng, wlr-randr
+Description: PTalk Signature native voice/eldercare client for Raspberry Pi 5
+ Native Python port of the PTalk Signature Flutter app. Real-time voice chat
+ with the AI backend over WebSocket (Opus uplink via libopus/ctypes, raw PCM16
+ downlink), a medicine scanner using the Pi camera (picamera2), and a
+ fullscreen touch UI (PyQt6) designed for elderly users. Audio I/O uses ALSA
+ (arecord/aplay); no PortAudio/sounddevice required.

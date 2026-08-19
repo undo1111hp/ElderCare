@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Build artifacts
+*.deb
+ptalk-build/
+build/
+dist/
+
+# Local overrides / secrets (never commit real hosts/tokens)
+.env
+*.local
+settings.json
+
+# OS
+.DS_Store
+Thumbs.db
