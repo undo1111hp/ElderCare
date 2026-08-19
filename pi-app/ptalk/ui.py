@@ -769,6 +769,14 @@ class SettingsScreen(SubScreen):
         self.em_lbl = QtWidgets.QLabel(); self.em_lbl.setFont(H(22, QtGui.QFont.Weight.ExtraBold))
         self.em_lbl.setStyleSheet(f"color:{EMERGENCY};")
         self.root.addWidget(self.em_lbl)
+        # network / wifi
+        self.root.addWidget(self._section("Mạng (WiFi) · Địa chỉ IP"))
+        self.net_lbl = QtWidgets.QLabel("—"); self.net_lbl.setFont(H(16, QtGui.QFont.Weight.DemiBold))
+        self.net_lbl.setWordWrap(True); self.net_lbl.setStyleSheet(f"color:{INK};")
+        self.root.addWidget(self.net_lbl)
+        wbtn = pill_button("Kết nối / đổi WiFi", GREEN_OK, min_h=64, pt=17)
+        wbtn.clicked.connect(lambda: app.navigate("wifi"))
+        self.root.addWidget(wbtn)
         self.root.addStretch()
 
     def _section(self, t):
@@ -778,6 +786,276 @@ class SettingsScreen(SubScreen):
     def refresh(self):
         self.fs_lbl.setText("Chữ ×%.2f" % _FS)
         self.em_lbl.setText(self.app.cfg.get("emergency", {}).get("number", "115"))
+        try:
+            from . import net
+            st = net.current()
+            self.net_lbl.setText("IP:  %s\nWiFi:  %s" % (st["ip"], st.get("ssid") or "(chưa kết nối)"))
+        except Exception:
+            self.net_lbl.setText("IP:  (không rõ)")
+
+
+# ======================================================================
+#  On-screen keyboard (touch) — for WiFi password without a hardware keyboard
+# ======================================================================
+class OnScreenKeyboard(QtWidgets.QWidget):
+    ROWS_ABC = ["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"]
+    ROWS_SYM = ["1234567890", "@#$%&*-_=+", "()[]{}/\\|~", "!?.,:;'\"`"]
+
+    def __init__(self, target):
+        super().__init__()
+        self.target = target
+        self._shift = False
+        self._sym = False
+        self.setStyleSheet("background:transparent;")
+        self.box = QtWidgets.QVBoxLayout(self)
+        self.box.setSpacing(6); self.box.setContentsMargins(0, 8, 0, 0)
+        self._render()
+
+    def _mk(self, label, cb, color="#FFFFFF"):
+        b = QtWidgets.QPushButton(label)
+        b.setMinimumHeight(50)
+        b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        b.setFont(H(16, QtGui.QFont.Weight.DemiBold))
+        b.setStyleSheet(f"QPushButton{{background:{color};border:1px solid #E6CBB9;border-radius:9px;"
+                        f"color:{INK};}}QPushButton:pressed{{background:#F0D8C8;}}")
+        b.clicked.connect(cb)
+        return b
+
+    def _clear(self):
+        while self.box.count():
+            it = self.box.takeAt(0)
+            lay = it.layout()
+            if lay:
+                while lay.count():
+                    w = lay.takeAt(0).widget()
+                    if w:
+                        w.setParent(None)
+            elif it.widget():
+                it.widget().setParent(None)
+
+    def _render(self):
+        self._clear()
+        rows = self.ROWS_SYM if self._sym else self.ROWS_ABC
+        for r in rows:
+            h = QtWidgets.QHBoxLayout(); h.setSpacing(5)
+            for ch in r:
+                lab = ch.upper() if (self._shift and not self._sym and ch.isalpha()) else ch
+                h.addWidget(self._mk(lab, (lambda _=None, c=ch: self._type(c))))
+            self.box.addLayout(h)
+        h = QtWidgets.QHBoxLayout(); h.setSpacing(5)
+        h.addWidget(self._mk("HOA" if not self._shift else "hoa", self._toggle_shift,
+                             color=("#F0D8C8" if self._shift else "#FFF3E8")))
+        h.addWidget(self._mk("abc" if self._sym else "#@1", self._toggle_sym, color="#FFF3E8"))
+        sp = self._mk("Dấu cách", lambda: self._insert(" "), color="#FFFFFF")
+        sp.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        h.addWidget(sp, 3)
+        h.addWidget(self._mk("Xoá", self._bksp, color="#F5E0D4"))
+        self.box.addLayout(h)
+
+    def _insert(self, s):
+        if self.target is not None:
+            self.target.insert(s)
+
+    def _type(self, ch):
+        c = ch.upper() if (self._shift and not self._sym and ch.isalpha()) else ch
+        self._insert(c)
+        if self._shift and not self._sym and ch.isalpha():
+            self._shift = False
+            self._render()
+
+    def _bksp(self):
+        if self.target is not None:
+            self.target.backspace()
+
+    def _toggle_shift(self):
+        self._shift = not self._shift; self._render()
+
+    def _toggle_sym(self):
+        self._sym = not self._sym; self._render()
+
+
+# ======================================================================
+#  WiFi screen — connect to Wi-Fi + show IP (usable inside the kiosk)
+# ======================================================================
+class _WifiSignals(QtCore.QObject):
+    scanned = QtCore.pyqtSignal(object)
+    connected = QtCore.pyqtSignal(bool, str)
+
+
+class WiFiScreen(SubScreen):
+    def __init__(self, app):
+        super().__init__(app, "Mạng WiFi")
+        from . import net
+        self._net = net
+        self._busy = False
+        self.sig = _WifiSignals()
+        self.sig.scanned.connect(self._on_scanned)
+        self.sig.connected.connect(self._on_connected)
+
+        self.status = QtWidgets.QLabel("")
+        self.status.setFont(H(16, QtGui.QFont.Weight.DemiBold)); self.status.setWordWrap(True)
+        self.status.setStyleSheet(f"color:{ACCENT_DARK};")
+        self.root.addWidget(self.status)
+
+        self.btn_scan = pill_button("Quét lại mạng WiFi", ACCENT, min_h=58, pt=17)
+        self.btn_scan.clicked.connect(self.do_scan)
+        self.root.addWidget(self.btn_scan)
+
+        # ── list of networks ──
+        self.listwrap = QtWidgets.QWidget(); self.listwrap.setStyleSheet("background:transparent;")
+        lw = QtWidgets.QVBoxLayout(self.listwrap); lw.setContentsMargins(0, 0, 0, 0); lw.setSpacing(8)
+        self.scroll = QtWidgets.QScrollArea(); self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.scroll.setStyleSheet("background:transparent;")
+        self.holder = QtWidgets.QWidget(); self.holder.setStyleSheet("background:transparent;")
+        self.vlist = QtWidgets.QVBoxLayout(self.holder); self.vlist.setSpacing(8)
+        self.vlist.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
+        self.scroll.setWidget(self.holder)
+        lw.addWidget(self.scroll, 1)
+        self.root.addWidget(self.listwrap, 1)
+
+        # ── connect panel (hidden until a network is picked) ──
+        self.panel = Glass(radius=20, alpha=225)
+        pv = QtWidgets.QVBoxLayout(self.panel); pv.setContentsMargins(14, 12, 14, 12); pv.setSpacing(8)
+        self.p_title = QtWidgets.QLabel(""); self.p_title.setFont(H(18, QtGui.QFont.Weight.ExtraBold))
+        self.p_title.setStyleSheet(f"color:{ACCENT_DARK};"); self.p_title.setWordWrap(True)
+        pv.addWidget(self.p_title)
+        self.pw = QtWidgets.QLineEdit(); self.pw.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+        self.pw.setPlaceholderText("Nhập mật khẩu WiFi"); self.pw.setFont(H(18))
+        self.pw.setMinimumHeight(54)
+        self.pw.setStyleSheet("QLineEdit{background:#FFFFFF;border:2px solid #E6CBB9;border-radius:10px;"
+                              f"padding:6px 10px;color:{INK};}}")
+        pv.addWidget(self.pw)
+        showrow = QtWidgets.QHBoxLayout()
+        self.show_pw = QtWidgets.QCheckBox("Hiện mật khẩu"); self.show_pw.setFont(H(14))
+        self.show_pw.setStyleSheet(f"color:{MUTED};")
+        self.show_pw.toggled.connect(lambda on: self.pw.setEchoMode(
+            QtWidgets.QLineEdit.EchoMode.Normal if on else QtWidgets.QLineEdit.EchoMode.Password))
+        showrow.addWidget(self.show_pw); showrow.addStretch()
+        pv.addLayout(showrow)
+        self.kbd = OnScreenKeyboard(self.pw)
+        pv.addWidget(self.kbd)
+        self.p_msg = QtWidgets.QLabel(""); self.p_msg.setFont(H(15, QtGui.QFont.Weight.DemiBold))
+        self.p_msg.setWordWrap(True); self.p_msg.setStyleSheet(f"color:{INK};")
+        pv.addWidget(self.p_msg)
+        brow = QtWidgets.QHBoxLayout(); brow.setSpacing(10)
+        back = pill_button("Quay lại", MUTED, min_h=60, pt=17); back.clicked.connect(self._show_list)
+        self.btn_conn = pill_button("Kết nối", GREEN_OK, min_h=60, pt=18); self.btn_conn.clicked.connect(self.do_connect)
+        brow.addWidget(back); brow.addWidget(self.btn_conn, 1)
+        pv.addLayout(brow)
+        self.root.addWidget(self.panel, 2)
+        self.panel.setVisible(False)
+
+    # ---------- lifecycle ----------
+    def refresh(self):
+        self._update_status()
+        self._show_list()
+        self.do_scan()
+
+    def _update_status(self):
+        try:
+            st = self._net.current()
+        except Exception:
+            st = {"ip": "(không rõ)", "ssid": ""}
+        ss = st.get("ssid") or "(chưa kết nối)"
+        self.status.setText("Địa chỉ IP:  %s\nĐang kết nối:  %s" % (st.get("ip", "-"), ss))
+
+    def _show_list(self):
+        self.panel.setVisible(False)
+        self.listwrap.setVisible(True)
+        self.btn_scan.setVisible(True)
+
+    def _clear_list(self):
+        while self.vlist.count():
+            it = self.vlist.takeAt(0)
+            if it.widget():
+                it.widget().setParent(None)
+
+    # ---------- scan ----------
+    def do_scan(self):
+        if self._busy:
+            return
+        self._busy = True
+        self.btn_scan.setText("Đang quét...")
+        self._clear_list()
+        info = QtWidgets.QLabel("Đang tìm mạng WiFi xung quanh..."); info.setFont(H(15))
+        info.setStyleSheet(f"color:{MUTED};"); info.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.vlist.addWidget(info)
+        threading.Thread(target=self._scan_worker, daemon=True).start()
+
+    def _scan_worker(self):
+        try:
+            nets = self._net.scan()
+        except Exception:
+            nets = []
+        self.sig.scanned.emit(nets)
+
+    def _on_scanned(self, nets):
+        self._busy = False
+        self.btn_scan.setText("Quét lại mạng WiFi")
+        self._update_status()
+        self._clear_list()
+        if not nets:
+            empty = QtWidgets.QLabel("Không tìm thấy mạng nào.\nThử bấm “Quét lại”.")
+            empty.setFont(H(16)); empty.setStyleSheet(f"color:{MUTED};")
+            empty.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self.vlist.addWidget(empty); return
+        for n in nets[:20]:
+            self.vlist.addWidget(self._net_btn(n))
+
+    def _net_btn(self, n):
+        sig = n.get("signal", 0)
+        level = "mạnh" if sig >= 67 else ("trung bình" if sig >= 40 else "yếu")
+        secured = self._net.is_secured(n.get("security"))
+        lock = "  ·  khoá" if secured else "  ·  mở"
+        b = pill_button("%s    (sóng %s%s)" % (n["ssid"], level, lock), ACCENT_DARK, min_h=64, pt=17)
+        b.clicked.connect(lambda _=None, net=n: self._pick(net))
+        return b
+
+    # ---------- connect ----------
+    def _pick(self, n):
+        self._sel = n
+        secured = self._net.is_secured(n.get("security"))
+        self.p_title.setText("Kết nối tới:  %s" % n["ssid"])
+        self.p_msg.setText("")
+        self.pw.setText("")
+        self.pw.setVisible(secured)
+        self.show_pw.setVisible(secured)
+        self.kbd.setVisible(secured)
+        self.listwrap.setVisible(False)
+        self.btn_scan.setVisible(False)
+        self.panel.setVisible(True)
+
+    def do_connect(self):
+        if self._busy or not getattr(self, "_sel", None):
+            return
+        secured = self._net.is_secured(self._sel.get("security"))
+        pwd = self.pw.text()
+        if secured and not pwd:
+            self.p_msg.setText("Bà nhập mật khẩu WiFi rồi bấm Kết nối nhé.")
+            return
+        self._busy = True
+        self.btn_conn.setText("Đang kết nối...")
+        self.p_msg.setText("Đang kết nối, bà chờ một chút...")
+        ssid = self._sel["ssid"]
+        threading.Thread(target=self._connect_worker, args=(ssid, pwd), daemon=True).start()
+
+    def _connect_worker(self, ssid, pwd):
+        try:
+            ok, msg = self._net.connect(ssid, pwd)
+        except Exception as e:
+            ok, msg = False, str(e)
+        self.sig.connected.emit(ok, msg)
+
+    def _on_connected(self, ok, msg):
+        self._busy = False
+        self.btn_conn.setText("Kết nối")
+        self._update_status()
+        if ok:
+            self.p_msg.setText("✔  " + msg + ".  Đã lưu mạng này.")
+            QtCore.QTimer.singleShot(1400, self._show_list)
+        else:
+            self.p_msg.setText("Chưa kết nối được: " + msg)
 
 
 # ======================================================================
@@ -862,7 +1140,8 @@ class MainWindow(QtWidgets.QWidget):
         self.reminders = RemindersScreen(self)
         self.addrem = AddReminderScreen(self)
         self.settings = SettingsScreen(self)
-        for s in (self.home, self.med, self.reminders, self.addrem, self.settings):
+        self.wifi = WiFiScreen(self)
+        for s in (self.home, self.med, self.reminders, self.addrem, self.settings, self.wifi):
             s.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
             self.stack.addWidget(s)
         self.alarm = AlarmOverlay(self)
@@ -884,10 +1163,11 @@ class MainWindow(QtWidgets.QWidget):
     # ---------- navigation ----------
     def navigate(self, name):
         target = {"home": self.home, "medicine": self.med, "reminders": self.reminders,
-                  "add": self.addrem, "settings": self.settings}.get(name, self.home)
+                  "add": self.addrem, "settings": self.settings, "wifi": self.wifi}.get(name, self.home)
         if name == "reminders": self.reminders.refresh()
         if name == "add": self.addrem.reset()
         if name == "settings": self.settings.refresh()
+        if name == "wifi": self.wifi.refresh()
         if name == "home": self.home.info.set_state(self.home.state)
         self.stack.setCurrentWidget(target)
 
@@ -1004,11 +1284,11 @@ class MainWindow(QtWidgets.QWidget):
 
     def _rebuild_screens(self):
         cur = self.stack.currentIndex()
-        old = [self.home, self.med, self.reminders, self.addrem, self.settings]
+        old = [self.home, self.med, self.reminders, self.addrem, self.settings, self.wifi]
         self.home = HomeScreen(self); self.med = MedicineScreen(self)
         self.reminders = RemindersScreen(self); self.addrem = AddReminderScreen(self)
-        self.settings = SettingsScreen(self)
-        for s in (self.home, self.med, self.reminders, self.addrem, self.settings):
+        self.settings = SettingsScreen(self); self.wifi = WiFiScreen(self)
+        for s in (self.home, self.med, self.reminders, self.addrem, self.settings, self.wifi):
             s.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
             self.stack.addWidget(s)
         for s in old:

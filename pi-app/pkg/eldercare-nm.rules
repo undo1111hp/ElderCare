@@ -1,0 +1,10 @@
+// Allow local, active users in the netdev/sudo groups to control NetworkManager
+// (Wi-Fi scan/connect) without a polkit password prompt — needed so the kiosk
+// app can connect Wi-Fi from its own fullscreen session.
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("org.freedesktop.NetworkManager.") === 0 &&
+        subject.local && subject.active &&
+        (subject.isInGroup("netdev") || subject.isInGroup("sudo"))) {
+        return polkit.Result.YES;
+    }
+});

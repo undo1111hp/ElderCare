@@ -143,7 +143,7 @@ def main():
                     choices=["idle", "recording", "uploading", "playing", "error"],
                     help="forced character state (for --screenshot)")
     ap.add_argument("--screen", default="home",
-                    choices=["home", "medicine", "reminders", "add", "settings", "alarm"],
+                    choices=["home", "medicine", "reminders", "add", "settings", "alarm", "wifi"],
                     help="which screen to render (for --screenshot)")
     ap.add_argument("--size", default="720x1280", help="WxH (for --screenshot)")
     ap.add_argument("--config", default=None, help="path to config.toml")

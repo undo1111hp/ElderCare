@@ -38,12 +38,17 @@ riêng **eldercare_poems** — KHÔNG sửa `llm_worker`/`tts_worker`/`stt_worke
 ### `pi-app/` (client)
 - `ptalk/` — mã nguồn: `config.py` (cấu hình), `voice_client.py` (VoiceEngine WS +
   parse khung chat JSON), `audio_io.py` (arecord/aplay + **auto-level/limiter loa**),
-  `ui.py` (đa màn hình, khung chat "Bà vừa nói / Ngân"), `opus_codec.py`, `protocol.py`,
-  `reminders.py`, `medicine.py`, `tts.py`, `__main__.py` (`--check`, `--screenshot`).
+  `ui.py` (đa màn hình, khung chat "Bà vừa nói / Ngân", **màn WiFi + bàn phím ảo**),
+  `net.py` (WiFi/IP qua nmcli), `opus_codec.py`, `protocol.py`, `reminders.py`,
+  `medicine.py`, `tts.py`, `__main__.py` (`--check`, `--screenshot`).
 - `pkg/` — control, postinst, launcher `/usr/bin/ptalk-signature`, `config.toml` mặc
-  định (đã trỏ `/device/ws`, `output_gain=0.6`), service kiosk.
+  định (đã trỏ `/device/ws`, `output_gain=0.6`), service kiosk, `eldercare-nm.rules`
+  (polkit cho netdev điều khiển WiFi từ kiosk).
 - `assets_src/` — ảnh nhân vật + logo.
-- `build_deb.sh` — build gói (VER hiện tại 0.4.0).
+- `build_deb.sh` — build gói (VER hiện tại 0.5.0).
+- **Cài đặt → "Kết nối / đổi WiFi"**: hiện IP + SSID đang dùng, quét mạng, chọn mạng,
+  nhập mật khẩu bằng bàn phím ảo trên màn hình (không cần bàn phím rời) — dùng ngay
+  trong kiosk, không phải thoát ra desktop.
 
 ### `server/` (dịch vụ /device)
 - `ptalk_signature/settings.py` — persona "Ngân" (gọi bà/xưng cháu), luật đọc thơ,
@@ -91,7 +96,7 @@ sudo ufw allow from 172.27.0.0/16 to any port 8005 proto tcp      # cho phép do
 ```bash
 # scp pi-app/ -> Pi:~/ptalk-native-src, đổi CRLF nếu build từ Windows:
 find . -type f \( -name '*.py' -o -name '*.sh' -o -name '*.toml' \) -exec sed -i 's/\r$//' {} +
-bash build_deb.sh && sudo dpkg -i ~/ptalk-build/ptalk-signature-native_0.4.0.deb
+bash build_deb.sh && sudo dpkg -i ~/ptalk-build/ptalk-signature-native_0.5.0.deb
 # tự chạy trong desktop labwc (không dùng cage vì desktop đã chiếm màn DSI):
 mkdir -p ~/.config/autostart && cp pkg autostart entry...   # đã cài; app tự bật khi boot
 ptalk-signature --check                                     # tự kiểm tra round-trip
@@ -111,4 +116,4 @@ ptalk-signature --check                                     # tự kiểm tra ro
 - Nhắc lịch/thuốc bằng lời qua `/device` (server sinh `reminder_action`, Pi giữ lịch offline).
 - Web search fallback (SearXNG tự host) khi kho thơ không có.
 - Camera Pi hiện báo "no camera detected" — kiểm tra lại cáp.
-- Đặt IP tĩnh cho Pi để khỏi đổi liên tục.
+- Đặt IP tĩnh cho Pi để khỏi đổi liên tục (giờ đã có màn WiFi trong app để đổi mạng).

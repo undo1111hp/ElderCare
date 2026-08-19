@@ -2,7 +2,7 @@
 # Build the ptalk-signature-native .deb on the Pi (run from the source root).
 set -e
 SRC="$(cd "$(dirname "$0")" && pwd)"
-VER=0.4.0
+VER=0.5.0
 PKG=ptalk-signature-native
 OUT="$HOME/ptalk-build"
 STAGE="$OUT/${PKG}_${VER}"
@@ -32,6 +32,10 @@ install -m 644 "$SRC/pkg/config.toml" "$STAGE/etc/ptalk-signature/config.toml"
 
 install -d "$STAGE/lib/systemd/system"
 install -m 644 "$SRC/pkg/ptalk-signature-kiosk.service" "$STAGE/lib/systemd/system/"
+
+# polkit rule: let netdev/sudo (local session) control Wi-Fi from the app
+install -d "$STAGE/etc/polkit-1/rules.d"
+install -m 644 "$SRC/pkg/eldercare-nm.rules" "$STAGE/etc/polkit-1/rules.d/50-eldercare-nm.rules"
 
 install -d "$STAGE/DEBIAN"
 install -m 644 "$SRC/pkg/control" "$STAGE/DEBIAN/control"
