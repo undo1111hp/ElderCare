@@ -152,6 +152,13 @@ class VoiceEngine:
         if self._loop:
             asyncio.run_coroutine_threadsafe(self._cancel(), self._loop)
 
+    def set_output_gain(self, g):
+        """Live-adjust speaker output gain (0..1) from Settings."""
+        try:
+            self._player.gain = float(g)
+        except Exception:
+            pass
+
     async def _talk_start(self):
         if self._talking or self.ws is None:
             return

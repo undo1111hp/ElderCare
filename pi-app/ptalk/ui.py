@@ -68,6 +68,23 @@ def pill_button(text, bg, fg="white", pt=17, radius=26, min_h=64):
     return b
 
 
+SLIDER_QSS = (
+    "QSlider::groove:horizontal{height:12px;border-radius:6px;background:#EAD3C2;}"
+    "QSlider::sub-page:horizontal{background:%s;border-radius:6px;}"
+    "QSlider::add-page:horizontal{background:#EAD3C2;border-radius:6px;}"
+    "QSlider::handle:horizontal{width:34px;height:34px;margin:-12px 0;border-radius:17px;"
+    "background:white;border:3px solid %s;}" % (ACCENT, ACCENT)
+)
+
+SCROLLBAR_QSS = (
+    "QScrollBar:vertical{background:transparent;width:8px;margin:2px;}"
+    "QScrollBar::handle:vertical{background:#D9B79F;border-radius:4px;min-height:44px;}"
+    "QScrollBar::handle:vertical:pressed{background:#C79B7F;}"
+    "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
+    "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:transparent;}"
+)
+
+
 # ======================================================================
 #  Starfield helpers
 # ======================================================================
@@ -109,6 +126,145 @@ class Glass(QtWidgets.QFrame):
         p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 160), 1))
         p.drawRoundedRect(r, self._r, self._r)
         p.end()
+
+
+# ======================================================================
+#  Modern components: glyphs, icon badges, cards, segmented control
+# ======================================================================
+def draw_glyph(p, kind, cx, cy, s, color):
+    col = QtGui.QColor(color)
+    pen = QtGui.QPen(col, max(2.4, s * 0.16))
+    pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(QtCore.Qt.PenJoinStyle.RoundJoin)
+    NB = QtCore.Qt.BrushStyle.NoBrush
+    NP = QtCore.Qt.PenStyle.NoPen
+    if kind == "font":
+        f = QtGui.QFont("Noto Sans"); f.setPixelSize(int(s * 1.7)); f.setWeight(QtGui.QFont.Weight.Black)
+        p.setFont(f); p.setPen(QtGui.QPen(col))
+        p.drawText(QtCore.QRectF(cx - s, cy - s, 2 * s, 2 * s), QtCore.Qt.AlignmentFlag.AlignCenter, "A")
+    elif kind == "speaker":
+        p.setPen(NP); p.setBrush(col)
+        path = QtGui.QPainterPath()
+        path.moveTo(cx - s * 0.6, cy - s * 0.22); path.lineTo(cx - s * 0.22, cy - s * 0.22)
+        path.lineTo(cx + s * 0.1, cy - s * 0.52); path.lineTo(cx + s * 0.1, cy + s * 0.52)
+        path.lineTo(cx - s * 0.22, cy + s * 0.22); path.lineTo(cx - s * 0.6, cy + s * 0.22)
+        path.closeSubpath(); p.drawPath(path)
+        p.setPen(pen); p.setBrush(NB)
+        p.drawArc(QtCore.QRectF(cx + s * 0.08, cy - s * 0.34, s * 0.5, s * 0.68), -60 * 16, 120 * 16)
+        p.drawArc(QtCore.QRectF(cx + s * 0.05, cy - s * 0.6, s * 0.95, s * 1.2), -55 * 16, 110 * 16)
+    elif kind == "screen":
+        p.setPen(pen); p.setBrush(NB)
+        p.drawRoundedRect(QtCore.QRectF(cx - s * 0.52, cy - s * 0.44, s * 1.04, s * 0.82), s * 0.14, s * 0.14)
+        p.drawLine(QtCore.QPointF(cx - s * 0.22, cy + s * 0.56), QtCore.QPointF(cx + s * 0.22, cy + s * 0.56))
+    elif kind == "wifi":
+        p.setPen(pen); p.setBrush(NB)
+        for rr in (0.92, 0.62, 0.33):
+            p.drawArc(QtCore.QRectF(cx - s * rr, cy - s * rr + s * 0.18, 2 * s * rr, 2 * s * rr), 35 * 16, 110 * 16)
+        p.setBrush(col); p.setPen(NP)
+        p.drawEllipse(QtCore.QPointF(cx, cy + s * 0.44), s * 0.1, s * 0.1)
+    elif kind == "phone":
+        white = col
+        path = QtGui.QPainterPath()
+        path.moveTo(cx - s * 0.5, cy - s * 0.4); path.quadTo(cx - s * 0.56, cy - s * 0.56, cx - s * 0.36, cy - s * 0.52)
+        path.lineTo(cx - s * 0.16, cy - s * 0.32); path.quadTo(cx - s * 0.09, cy - s * 0.25, cx - s * 0.18, cy - s * 0.14)
+        path.quadTo(cx - s * 0.02, cy + s * 0.2, cx + s * 0.29, cy + s * 0.27)
+        path.quadTo(cx + s * 0.18, cy + s * 0.09, cx + s * 0.27, cy + s * 0.02)
+        path.quadTo(cx + s * 0.38, cy - s * 0.07, cx + s * 0.52, cy + s * 0.02)
+        path.quadTo(cx + s * 0.61, cy + s * 0.18, cx + s * 0.45, cy + s * 0.38)
+        path.quadTo(cx + s * 0.27, cy + s * 0.56, cx - s * 0.05, cy + s * 0.45)
+        path.quadTo(cx - s * 0.5, cy + s * 0.27, cx - s * 0.56, cy - s * 0.18)
+        path.quadTo(cx - s * 0.6, cy - s * 0.31, cx - s * 0.5, cy - s * 0.4)
+        p.setBrush(white); p.setPen(NP); p.drawPath(path)
+    elif kind == "chevron":
+        p.setPen(pen)
+        p.drawLine(QtCore.QPointF(cx - s * 0.12, cy - s * 0.4), QtCore.QPointF(cx + s * 0.28, cy))
+        p.drawLine(QtCore.QPointF(cx + s * 0.28, cy), QtCore.QPointF(cx - s * 0.12, cy + s * 0.4))
+    elif kind == "info":
+        p.setPen(pen); p.setBrush(NB)
+        p.drawEllipse(QtCore.QPointF(cx, cy), s * 0.52, s * 0.52)
+        p.setBrush(col); p.setPen(NP)
+        p.drawEllipse(QtCore.QPointF(cx, cy - s * 0.24), s * 0.09, s * 0.09)
+        p.setPen(pen); p.drawLine(QtCore.QPointF(cx, cy - s * 0.02), QtCore.QPointF(cx, cy + s * 0.34))
+
+
+class IconBadge(QtWidgets.QWidget):
+    """A soft-tinted rounded square with a colored glyph — modern settings icon."""
+    def __init__(self, kind, color, size=46, parent=None):
+        super().__init__(parent)
+        self.kind = kind; self.color = QtGui.QColor(color)
+        self.setFixedSize(size, size)
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self); p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        w = self.width()
+        tint = QtGui.QColor(self.color); tint.setAlpha(40)
+        p.setPen(QtCore.Qt.PenStyle.NoPen); p.setBrush(tint)
+        p.drawRoundedRect(QtCore.QRectF(0, 0, w, w), w * 0.30, w * 0.30)
+        draw_glyph(p, self.kind, w / 2, w / 2, w * 0.30, self.color)
+        p.end()
+
+
+class Card(Glass):
+    """Rounded white panel with a soft shadow; header(icon+title) + body via .v."""
+    def __init__(self, radius=22, alpha=238, parent=None):
+        super().__init__(radius=radius, alpha=alpha, parent=parent)
+        try:
+            eff = QtWidgets.QGraphicsDropShadowEffect(self)
+            eff.setBlurRadius(26); eff.setOffset(0, 6)
+            eff.setColor(QtGui.QColor(150, 80, 30, 55))
+            self.setGraphicsEffect(eff)
+        except Exception:
+            pass
+        self.v = QtWidgets.QVBoxLayout(self)
+        self.v.setContentsMargins(18, 15, 18, 16); self.v.setSpacing(12)
+
+    def header(self, kind, color, title, subtitle=None):
+        h = QtWidgets.QHBoxLayout(); h.setSpacing(12)
+        h.addWidget(IconBadge(kind, color, 46), 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        tv = QtWidgets.QVBoxLayout(); tv.setSpacing(0)
+        t = QtWidgets.QLabel(title); t.setFont(H(16.5, QtGui.QFont.Weight.ExtraBold)); t.setStyleSheet(f"color:{INK};")
+        tv.addWidget(t)
+        self.sub = None
+        if subtitle is not None:
+            self.sub = QtWidgets.QLabel(subtitle); self.sub.setFont(H(13)); self.sub.setWordWrap(True)
+            self.sub.setStyleSheet(f"color:{MUTED};"); tv.addWidget(self.sub)
+        h.addLayout(tv, 1)
+        self.v.addLayout(h)
+        return h
+
+
+class Segmented(QtWidgets.QWidget):
+    """Modern segmented selector (row of connected pills; one highlighted)."""
+    changed = QtCore.pyqtSignal(int)
+
+    def __init__(self, options, current=0, parent=None):
+        super().__init__(parent)
+        self.cur = current; self._btns = []
+        self.setStyleSheet("background:transparent;")
+        row = QtWidgets.QHBoxLayout(self); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(6)
+        for i, o in enumerate(options):
+            b = QtWidgets.QPushButton(o); b.setMinimumHeight(54)
+            b.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            b.setFont(H(15, QtGui.QFont.Weight.DemiBold))
+            b.clicked.connect(lambda _=None, idx=i: self.select(idx))
+            row.addWidget(b, 1); self._btns.append(b)
+        self._restyle()
+
+    def select(self, idx):
+        if idx == self.cur:
+            return
+        self.cur = idx; self._restyle(); self.changed.emit(idx)
+
+    def set_current(self, idx):
+        self.cur = idx; self._restyle()
+
+    def _restyle(self):
+        for i, b in enumerate(self._btns):
+            if i == self.cur:
+                b.setStyleSheet("QPushButton{background:%s;color:white;border:none;border-radius:15px;}" % ACCENT)
+            else:
+                b.setStyleSheet("QPushButton{background:#FBEFE7;color:%s;border:1px solid #EAD3C2;border-radius:15px;}"
+                                "QPushButton:pressed{background:#F3E0D2;}" % ACCENT_DARK)
 
 
 # ======================================================================
@@ -327,11 +483,11 @@ class InfoPanel(Glass):
         self.app = app
         self.mode = "idle"
         self._last_min = -1
-        self.setMinimumHeight(int(112 + 56 * _FS))
+        self.setMinimumHeight(int(128 + 66 * _FS))
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
-                           QtWidgets.QSizePolicy.Policy.Fixed)
+                           QtWidgets.QSizePolicy.Policy.Minimum)
         v = QtWidgets.QVBoxLayout(self)
-        v.setContentsMargins(24, 14, 24, 14); v.setSpacing(6)
+        v.setContentsMargins(24, 16, 24, 16); v.setSpacing(6)
         v.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.l1 = QtWidgets.QLabel("")
         self.l1.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -547,18 +703,29 @@ class HomeScreen(QtWidgets.QWidget):
 #  Simple screen scaffold (header with back + title)
 # ======================================================================
 class SubScreen(QtWidgets.QWidget):
-    def __init__(self, app, title):
+    """Base sub-screen: a full-width header + a horizontally-centered, max-width
+    content column (self.root). The max-width keeps it from stretching ugly on
+    wide/landscape screens; child screens just add to self.root as before."""
+    def __init__(self, app, title, max_width=680):
         super().__init__()
         self.app = app
-        self.root = QtWidgets.QVBoxLayout(self)
-        self.root.setContentsMargins(16, 14, 16, 18); self.root.setSpacing(12)
-        head = QtWidgets.QHBoxLayout()
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
+        head = QtWidgets.QHBoxLayout(); head.setContentsMargins(14, 12, 16, 4); head.setSpacing(10)
         back = CircleButton("back", ACCENT, 46); back.clicked.connect(lambda: app.navigate("home"))
         head.addWidget(back)
-        lbl = QtWidgets.QLabel(title); lbl.setFont(H(21, QtGui.QFont.Weight.ExtraBold))
+        lbl = QtWidgets.QLabel(title); lbl.setFont(H(22, QtGui.QFont.Weight.ExtraBold))
         lbl.setStyleSheet(f"color:{ACCENT_DARK};")
         head.addWidget(lbl); head.addStretch()
-        self.root.addLayout(head)
+        outer.addLayout(head)
+        center = QtWidgets.QHBoxLayout(); center.setContentsMargins(0, 0, 0, 0)
+        center.addStretch()
+        self._col = QtWidgets.QWidget(); self._col.setStyleSheet("background:transparent;")
+        self._col.setMaximumWidth(max_width)
+        self.root = QtWidgets.QVBoxLayout(self._col)
+        self.root.setContentsMargins(16, 2, 16, 16); self.root.setSpacing(14)
+        center.addWidget(self._col, 1); center.addStretch()
+        outer.addLayout(center, 1)
 
 
 # ======================================================================
@@ -745,53 +912,87 @@ class AddReminderScreen(SubScreen):
 #  Settings screen
 # ======================================================================
 class SettingsScreen(SubScreen):
+    FS_LEVELS = [1.0, 1.15, 1.35, 1.55]
+
     def __init__(self, app):
         super().__init__(app, "Cài đặt")
-        # font size
-        self.root.addWidget(self._section("Cỡ chữ"))
-        frow = QtWidgets.QHBoxLayout(); frow.setSpacing(12)
-        minus = pill_button("A−", ACCENT, min_h=70, pt=24); minus.clicked.connect(lambda: app.change_font(-0.1))
-        self.fs_lbl = QtWidgets.QLabel(); self.fs_lbl.setFont(H(18, QtGui.QFont.Weight.DemiBold))
-        self.fs_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter); self.fs_lbl.setStyleSheet(f"color:{INK};")
-        plus = pill_button("A+", ACCENT, min_h=70, pt=24); plus.clicked.connect(lambda: app.change_font(+0.1))
-        frow.addWidget(minus); frow.addWidget(self.fs_lbl, 1); frow.addWidget(plus)
-        self.root.addLayout(frow)
-        # orientation
-        self.root.addWidget(self._section("Hướng màn hình"))
-        orow = QtWidgets.QHBoxLayout(); orow.setSpacing(12)
-        p = pill_button("Dọc", ACCENT, min_h=64, pt=16); p.clicked.connect(lambda: app.set_rotation(0))
-        l = pill_button("Ngang", ACCENT, min_h=64, pt=16); l.clicked.connect(lambda: app.set_rotation(90))
-        r90 = pill_button("Xoay 90°", GREEN_OK, min_h=64, pt=16); r90.clicked.connect(app.rotate_90)
-        orow.addWidget(p); orow.addWidget(l); orow.addWidget(r90)
-        self.root.addLayout(orow)
-        # emergency
-        self.root.addWidget(self._section("Số gọi khẩn cấp"))
-        self.em_lbl = QtWidgets.QLabel(); self.em_lbl.setFont(H(22, QtGui.QFont.Weight.ExtraBold))
-        self.em_lbl.setStyleSheet(f"color:{EMERGENCY};")
-        self.root.addWidget(self.em_lbl)
-        # network / wifi
-        self.root.addWidget(self._section("Mạng (WiFi) · Địa chỉ IP"))
-        self.net_lbl = QtWidgets.QLabel("—"); self.net_lbl.setFont(H(16, QtGui.QFont.Weight.DemiBold))
-        self.net_lbl.setWordWrap(True); self.net_lbl.setStyleSheet(f"color:{INK};")
-        self.root.addWidget(self.net_lbl)
-        wbtn = pill_button("Kết nối / đổi WiFi", GREEN_OK, min_h=64, pt=17)
-        wbtn.clicked.connect(lambda: app.navigate("wifi"))
-        self.root.addWidget(wbtn)
-        self.root.addStretch()
+        scroll = QtWidgets.QScrollArea(); scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}" + SCROLLBAR_QSS)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body = QtWidgets.QWidget(); body.setStyleSheet("background:transparent;")
+        col = QtWidgets.QVBoxLayout(body); col.setContentsMargins(4, 4, 12, 10); col.setSpacing(16)
+        col.setAlignment(QtCore.Qt.AlignmentFlag.AlignTop)
 
-    def _section(self, t):
-        l = QtWidgets.QLabel(t); l.setFont(H(15, QtGui.QFont.Weight.DemiBold))
-        l.setStyleSheet(f"color:{MUTED};"); return l
+        # Cỡ chữ
+        c = Card(); c.header("font", ACCENT, "Cỡ chữ", "Chọn cỡ chữ dễ đọc nhất")
+        self.seg_font = Segmented(["Nhỏ", "Vừa", "Lớn", "Rất lớn"], 1)
+        self.seg_font.changed.connect(lambda i: app.set_font_scale(self.FS_LEVELS[i]))
+        c.v.addWidget(self.seg_font); col.addWidget(c)
+
+        # Âm lượng loa
+        c = Card(); c.header("speaker", "#2E7D32", "Âm lượng loa", "Kéo để tăng hoặc giảm tiếng")
+        self.vol = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.vol.setMinimum(20); self.vol.setMaximum(100); self.vol.setPageStep(5)
+        self.vol.setStyleSheet(SLIDER_QSS); self.vol.setMinimumHeight(40)
+        self.vol.sliderReleased.connect(lambda: app.set_output_gain(self.vol.value() / 100.0))
+        vrow = QtWidgets.QHBoxLayout(); vrow.setSpacing(12)
+        s1 = QtWidgets.QLabel("Nhỏ"); s1.setFont(H(13)); s1.setStyleSheet(f"color:{MUTED};")
+        s2 = QtWidgets.QLabel("To"); s2.setFont(H(13)); s2.setStyleSheet(f"color:{MUTED};")
+        vrow.addWidget(s1); vrow.addWidget(self.vol, 1); vrow.addWidget(s2)
+        c.v.addLayout(vrow); col.addWidget(c)
+
+        # Màn hình
+        c = Card(); c.header("screen", "#1F9E8A", "Màn hình", "Hướng hiển thị")
+        self.seg_rot = Segmented(["Dọc", "Ngang"], 0)
+        self.seg_rot.changed.connect(lambda i: app.set_rotation(0 if i == 0 else 90))
+        c.v.addWidget(self.seg_rot)
+        r90 = pill_button("Xoay 90°", GREEN_OK, min_h=54, pt=15, radius=15)
+        r90.clicked.connect(app.rotate_90); c.v.addWidget(r90); col.addWidget(c)
+
+        # WiFi & Mạng
+        c = Card(); c.header("wifi", "#2F6FE6", "WiFi & Mạng", "Kết nối mạng và xem địa chỉ IP")
+        self.net_ssid = QtWidgets.QLabel("—"); self.net_ssid.setFont(H(15, QtGui.QFont.Weight.DemiBold))
+        self.net_ssid.setStyleSheet(f"color:{INK};"); self.net_ssid.setWordWrap(True)
+        self.net_ip = QtWidgets.QLabel("—"); self.net_ip.setFont(H(14)); self.net_ip.setStyleSheet(f"color:{MUTED};")
+        c.v.addWidget(self.net_ssid); c.v.addWidget(self.net_ip)
+        wbtn = pill_button("Kết nối / đổi WiFi", "#2F6FE6", min_h=56, pt=16, radius=16)
+        wbtn.clicked.connect(lambda: app.navigate("wifi")); c.v.addWidget(wbtn); col.addWidget(c)
+
+        # Gọi khẩn cấp
+        c = Card(); c.header("phone", EMERGENCY, "Gọi khẩn cấp", "Số gọi khi cần trợ giúp")
+        self.em_lbl = QtWidgets.QLabel("115"); self.em_lbl.setFont(H(30, QtGui.QFont.Weight.ExtraBold))
+        self.em_lbl.setStyleSheet(f"color:{EMERGENCY};")
+        c.v.addWidget(self.em_lbl); col.addWidget(c)
+
+        # Thông tin
+        c = Card(); c.header("info", MUTED, "Thông tin thiết bị")
+        try:
+            import socket; host = socket.gethostname()
+        except Exception:
+            host = "-"
+        self.info_lbl = QtWidgets.QLabel("Elder Care · Ngân\nThiết bị: %s" % host)
+        self.info_lbl.setFont(H(13)); self.info_lbl.setWordWrap(True); self.info_lbl.setStyleSheet(f"color:{MUTED};")
+        c.v.addWidget(self.info_lbl); col.addWidget(c)
+
+        scroll.setWidget(body)
+        self.root.addWidget(scroll, 1)
 
     def refresh(self):
-        self.fs_lbl.setText("Chữ ×%.2f" % _FS)
+        cur = min(range(len(self.FS_LEVELS)), key=lambda i: abs(self.FS_LEVELS[i] - _FS))
+        self.seg_font.set_current(cur)
+        g = float(self.app.cfg.get("audio", {}).get("output_gain", 0.6))
+        self.vol.blockSignals(True); self.vol.setValue(int(round(g * 100))); self.vol.blockSignals(False)
+        rot = int(self.app.cfg.get("ui", {}).get("rotation", 0))
+        self.seg_rot.set_current(1 if rot in (90, 270) else 0)
         self.em_lbl.setText(self.app.cfg.get("emergency", {}).get("number", "115"))
         try:
             from . import net
             st = net.current()
-            self.net_lbl.setText("IP:  %s\nWiFi:  %s" % (st["ip"], st.get("ssid") or "(chưa kết nối)"))
+            self.net_ssid.setText("Đang dùng:  %s" % (st.get("ssid") or "(chưa kết nối)"))
+            self.net_ip.setText("Địa chỉ IP:  %s" % st["ip"])
         except Exception:
-            self.net_lbl.setText("IP:  (không rõ)")
+            self.net_ssid.setText("Đang dùng:  (không rõ)"); self.net_ip.setText("")
 
 
 # ======================================================================
@@ -892,12 +1093,14 @@ class WiFiScreen(SubScreen):
         self.sig.scanned.connect(self._on_scanned)
         self.sig.connected.connect(self._on_connected)
 
+        stcard = Card(); stcard.header("wifi", "#2F6FE6", "Trạng thái mạng")
         self.status = QtWidgets.QLabel("")
-        self.status.setFont(H(16, QtGui.QFont.Weight.DemiBold)); self.status.setWordWrap(True)
-        self.status.setStyleSheet(f"color:{ACCENT_DARK};")
-        self.root.addWidget(self.status)
+        self.status.setFont(H(15, QtGui.QFont.Weight.DemiBold)); self.status.setWordWrap(True)
+        self.status.setStyleSheet(f"color:{INK};")
+        stcard.v.addWidget(self.status)
+        self.root.addWidget(stcard)
 
-        self.btn_scan = pill_button("Quét lại mạng WiFi", ACCENT, min_h=58, pt=17)
+        self.btn_scan = pill_button("Quét lại mạng WiFi", ACCENT, min_h=58, pt=17, radius=18)
         self.btn_scan.clicked.connect(self.do_scan)
         self.root.addWidget(self.btn_scan)
 
@@ -1005,10 +1208,15 @@ class WiFiScreen(SubScreen):
 
     def _net_btn(self, n):
         sig = n.get("signal", 0)
-        level = "mạnh" if sig >= 67 else ("trung bình" if sig >= 40 else "yếu")
+        level = "sóng mạnh" if sig >= 67 else ("sóng trung bình" if sig >= 40 else "sóng yếu")
         secured = self._net.is_secured(n.get("security"))
-        lock = "  ·  khoá" if secured else "  ·  mở"
-        b = pill_button("%s    (sóng %s%s)" % (n["ssid"], level, lock), ACCENT_DARK, min_h=64, pt=17)
+        lock = "khoá" if secured else "mở"
+        b = QtWidgets.QPushButton("%s\n%s · %s" % (n["ssid"], level, lock))
+        b.setMinimumHeight(74); b.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        b.setFont(H(16, QtGui.QFont.Weight.DemiBold))
+        b.setStyleSheet(
+            "QPushButton{background:white;color:%s;border:1px solid #EAD3C2;border-radius:16px;"
+            "padding:8px 18px;text-align:left;}QPushButton:pressed{background:#FBEFE7;}" % INK)
         b.clicked.connect(lambda _=None, net=n: self._pick(net))
         return b
 
@@ -1267,6 +1475,21 @@ class MainWindow(QtWidgets.QWidget):
         self.cfg.save_user("ui", {"font_scale": _FS})
         self._rebuild_screens()
         self.navigate("settings")
+
+    def set_font_scale(self, v):
+        global _FS
+        _FS = max(0.9, min(1.8, round(float(v), 2)))
+        self.cfg.save_user("ui", {"font_scale": _FS})
+        self._rebuild_screens()
+        self.navigate("settings")
+
+    def set_output_gain(self, g):
+        g = max(0.2, min(1.0, round(float(g), 2)))
+        self.cfg.save_user("audio", {"output_gain": g})
+        try:
+            self.engine.set_output_gain(g)
+        except Exception:
+            pass
 
     def _out(self):
         return self.cfg.get("display", {}).get("output", "DSI-2")

@@ -45,10 +45,14 @@ riêng **eldercare_poems** — KHÔNG sửa `llm_worker`/`tts_worker`/`stt_worke
   định (đã trỏ `/device/ws`, `output_gain=0.6`), service kiosk, `eldercare-nm.rules`
   (polkit cho netdev điều khiển WiFi từ kiosk).
 - `assets_src/` — ảnh nhân vật + logo.
-- `build_deb.sh` — build gói (VER hiện tại 0.5.0).
+- `build_deb.sh` — build gói (VER hiện tại 0.6.0).
 - **Cài đặt → "Kết nối / đổi WiFi"**: hiện IP + SSID đang dùng, quét mạng, chọn mạng,
   nhập mật khẩu bằng bàn phím ảo trên màn hình (không cần bàn phím rời) — dùng ngay
   trong kiosk, không phải thoát ra desktop.
+- **Giao diện (0.6.0)**: thiết kế lại theo **thẻ (card) hiện đại** có icon + đổ bóng
+  mềm, **responsive** (cột giữa giới hạn bề rộng, không giãn xấu ở màn ngang), điều
+  khiển bằng **segmented + thanh trượt âm lượng**. Thành phần dùng lại: `Card`,
+  `IconBadge`, `Segmented`, `draw_glyph` (icon vẽ bằng QPainter, Pi không có font emoji).
 
 ### `server/` (dịch vụ /device)
 - `ptalk_signature/settings.py` — persona "Ngân" (gọi bà/xưng cháu), luật đọc thơ,
@@ -96,7 +100,7 @@ sudo ufw allow from 172.27.0.0/16 to any port 8005 proto tcp      # cho phép do
 ```bash
 # scp pi-app/ -> Pi:~/ptalk-native-src, đổi CRLF nếu build từ Windows:
 find . -type f \( -name '*.py' -o -name '*.sh' -o -name '*.toml' \) -exec sed -i 's/\r$//' {} +
-bash build_deb.sh && sudo dpkg -i ~/ptalk-build/ptalk-signature-native_0.5.0.deb
+bash build_deb.sh && sudo dpkg -i ~/ptalk-build/ptalk-signature-native_0.6.0.deb
 # tự chạy trong desktop labwc (không dùng cage vì desktop đã chiếm màn DSI):
 mkdir -p ~/.config/autostart && cp pkg autostart entry...   # đã cài; app tự bật khi boot
 ptalk-signature --check                                     # tự kiểm tra round-trip
