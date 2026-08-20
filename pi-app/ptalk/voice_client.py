@@ -293,8 +293,11 @@ class VoiceEngine:
             self._wake.mute(True)
         self._mic.set_consumer(None)                     # stop feeding the detector
         self._emit("WAKE")                               # UI: "cháu nghe đây..."
+        # Play the blip through the player we already own — a second aplay client
+        # reconfigures this USB device and kills the capture stream mid-turn.
         try:
-            tts.ack()                                    # gentle acknowledgement blip
+            self._player.start()
+            self._player.write(tts.ack_pcm(self.sr))
         except Exception as e:
             _dlog("  ack failed: %r" % (e,))
         # Start capturing *after* the ack so it isn't heard as the first words.
@@ -367,10 +370,17 @@ class VoiceEngine:
         await self._sendq.put("START_PCM_OUT")  # clears the server's buffer...
         await self._sendq.put("END")            # ...so END processes nothing
         self._emit("WAKE_NO_SPEECH")            # UI shows the prompt
+        msg = "Dạ, bà cần gì thì nói với cháu nhé"
         try:
-            tts.speak("Dạ, bà cần gì thì nói với cháu nhé")
-        except Exception:
-            pass
+            pcm = await self._loop.run_in_executor(
+                None, tts.speak_pcm, msg, self.sr)
+            if pcm:
+                self._player.start()
+                self._player.write(pcm)         # reuse the one output client
+            else:
+                tts.speak(msg)                  # fallback
+        except Exception as e:
+            _dlog("  local reply failed: %r" % (e,))
         await asyncio.sleep(3.0)                # let the local reply finish
         self._local_reply = False
         self._rearm_wake()

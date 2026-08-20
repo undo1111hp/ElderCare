@@ -21,6 +21,8 @@ class SharedMic:
     uplink encoder. set_consumer(None) suspends delivery without closing the mic.
     """
 
+    MAX_BACKOFF = 8.0          # seconds between capture-restart attempts
+
     def __init__(self, device, sample_rate, channels, frame_bytes):
         self.device = device
         self.sr = sample_rate
@@ -68,8 +70,16 @@ class SharedMic:
         except Exception:
             try:
                 p.kill()
+                p.wait(timeout=1)
             except Exception:
                 pass
+        # Close the pipe explicitly. Leaving it to the garbage collector leaks a
+        # file descriptor per respawn, which matters once respawns repeat.
+        try:
+            if p.stdout:
+                p.stdout.close()
+        except Exception:
+            pass
 
     def start(self):
         if self._run:
@@ -90,11 +100,13 @@ class SharedMic:
         sat in 'listening' forever. Respawn instead.
         """
         need = self.frame_bytes
+        backoff = 0.5
         while self._run:
             p = self._proc
             if p is None:
                 if not self._spawn():
-                    time.sleep(1.0)
+                    time.sleep(min(backoff, self.MAX_BACKOFF))
+                    backoff = min(backoff * 2, self.MAX_BACKOFF)
                     continue
                 p = self._proc
             try:
@@ -105,11 +117,17 @@ class SharedMic:
                 if not self._run:
                     break
                 self._restarts += 1
-                print("[sharedmic] capture ended (restart #%d) — respawning arecord"
-                      % self._restarts, flush=True)
+                if self._restarts <= 10 or self._restarts % 50 == 0:
+                    print("[sharedmic] capture ended (restart #%d) — respawning in %.1fs"
+                          % (self._restarts, backoff), flush=True)
                 self._kill_proc()
-                time.sleep(0.25)          # let the device settle
+                # Back off exponentially. This is a USB audio device: reopening
+                # it in a tight loop makes the kernel fail the interface outright
+                # ("usb_set_interface failed (-71)") and wedges capture for good.
+                time.sleep(min(backoff, self.MAX_BACKOFF))
+                backoff = min(backoff * 2, self.MAX_BACKOFF)
                 continue
+            backoff = 0.5                 # healthy again
             with self._lock:
                 c = self._consumer
             if c is not None:
