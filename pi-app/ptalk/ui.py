@@ -1459,6 +1459,10 @@ class MainWindow(QtWidgets.QWidget):
             self.home._set_state("recording")
             self.home.set_status("Cháu nghe đây… bà nói đi ạ")
             return
+        if ev == "WAKE_NO_SPEECH":
+            self.home._set_state("idle")
+            self.home.set_status("Dạ, bà cần gì thì nói với cháu nhé")
+            return
         self.home.apply_voice_event(ev)
 
     def scan_medicine(self):

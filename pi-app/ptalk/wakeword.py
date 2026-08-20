@@ -16,6 +16,22 @@ import numpy as np
 
 _HOP16 = 1280  # openWakeWord processes 80 ms @ 16 kHz per step
 
+# Set PTALK_WAKE_DEBUG=1 to append per-second peak scores + every fire to
+# /tmp/ptalk_wake.log — the only way to tell "never heard it" from "heard it but
+# scored below threshold" once the app is running headless on the device.
+_DEBUG = os.environ.get("PTALK_WAKE_DEBUG") == "1"
+_DEBUG_PATH = os.environ.get("PTALK_WAKE_LOG", "/tmp/ptalk_wake.log")
+
+
+def _dlog(msg):
+    if not _DEBUG:
+        return
+    try:
+        with open(_DEBUG_PATH, "a") as f:
+            f.write("%s %s\n" % (time.strftime("%H:%M:%S"), msg))
+    except Exception:
+        pass
+
 
 class WakeWord:
     def __init__(self, model_path, on_wake, threshold=0.5, src_rate=48000,
@@ -165,13 +181,25 @@ class WakeWord:
         if not scores:
             return
         score = scores.get(self._name) if self._name in scores else max(scores.values())
+        if _DEBUG:
+            self._dbg_peak = max(getattr(self, "_dbg_peak", 0.0), float(score))
+            self._dbg_lvl = max(getattr(self, "_dbg_lvl", 0.0),
+                                float(np.abs(hop16).max()))
+            n = getattr(self, "_dbg_n", 0) + 1
+            self._dbg_n = n
+            if n % 12 == 0:                 # ~ once per second
+                _dlog("peak_score=%.3f mic_peak=%d" % (self._dbg_peak, int(self._dbg_lvl)))
+                self._dbg_peak = 0.0
+                self._dbg_lvl = 0.0
         if score >= self._thr:
             self._hits += 1
             now = time.monotonic()
+            _dlog("HIT score=%.3f hits=%d/%d" % (score, self._hits, self._need))
             if self._hits >= self._need and (now - self._last_fire) >= self._refractory:
                 self._last_fire = now
                 self._hits = 0
                 self.reset()
+                _dlog("*** WAKE FIRED (score=%.3f) ***" % score)
                 try:
                     self._on_wake(float(score))
                 except Exception:

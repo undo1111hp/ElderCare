@@ -7,59 +7,9 @@ ALSA directly (or PipeWire's ALSA bridge), which is robust on the Pi.
 import queue
 import subprocess
 import threading
+import time
 
 import numpy as np
-
-
-class Recorder:
-    """Streams fixed-size PCM16 frames from the mic to on_frame(bytes)."""
-
-    def __init__(self, device, sample_rate, channels, frame_bytes, on_frame):
-        self.device = device
-        self.sr = sample_rate
-        self.ch = channels
-        self.frame_bytes = frame_bytes
-        self.on_frame = on_frame
-        self._proc = None
-        self._thread = None
-        self._run = False
-
-    def start(self):
-        if self._run:
-            return
-        cmd = ["arecord", "-q", "-t", "raw", "-f", "S16_LE",
-               "-r", str(self.sr), "-c", str(self.ch), "-D", self.device]
-        self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                      stderr=subprocess.DEVNULL)
-        self._run = True
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-
-    def _loop(self):
-        need = self.frame_bytes
-        rd = self._proc.stdout
-        while self._run:
-            buf = rd.read(need)
-            if not buf or len(buf) < need:
-                break
-            try:
-                self.on_frame(buf)
-            except Exception:
-                pass
-
-    def stop(self):
-        self._run = False
-        p = self._proc
-        self._proc = None
-        if p:
-            try:
-                p.terminate()
-                p.wait(timeout=1)
-            except Exception:
-                try:
-                    p.kill()
-                except Exception:
-                    pass
 
 
 class SharedMic:
@@ -81,6 +31,12 @@ class SharedMic:
         self._run = False
         self._consumer = None
         self._lock = threading.Lock()
+        self._err_count = 0
+        self._restarts = 0
+
+    def alive(self):
+        """True only if the reader thread is genuinely still pumping frames."""
+        return self._run and self._thread is not None and self._thread.is_alive()
 
     def set_consumer(self, fn):
         with self._lock:
@@ -89,47 +45,89 @@ class SharedMic:
     def running(self):
         return self._run
 
+    def _spawn(self):
+        cmd = ["arecord", "-q", "-t", "raw", "-f", "S16_LE",
+               "-r", str(self.sr), "-c", str(self.ch), "-D", self.device]
+        try:
+            self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                          stderr=subprocess.DEVNULL)
+            return True
+        except Exception as e:
+            print("[sharedmic] cannot start arecord:", repr(e), flush=True)
+            self._proc = None
+            return False
+
+    def _kill_proc(self):
+        p = self._proc
+        self._proc = None
+        if not p:
+            return
+        try:
+            p.terminate()
+            p.wait(timeout=1)
+        except Exception:
+            try:
+                p.kill()
+            except Exception:
+                pass
+
     def start(self):
         if self._run:
             return
-        cmd = ["arecord", "-q", "-t", "raw", "-f", "S16_LE",
-               "-r", str(self.sr), "-c", str(self.ch), "-D", self.device]
-        self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                      stderr=subprocess.DEVNULL)
+        if not self._spawn():
+            return
         self._run = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     def _loop(self):
+        """Keep one capture stream alive for the lifetime of the app.
+
+        arecord can hand us EOF mid-session (the audio server reconfigures the
+        device — playing the wake chime is enough to do it). Previously that
+        ended this thread while `running()` still said True, so nothing restarted
+        it: the mic looked healthy but delivered no frames, and a hands-free turn
+        sat in 'listening' forever. Respawn instead.
+        """
         need = self.frame_bytes
-        rd = self._proc.stdout
         while self._run:
-            buf = rd.read(need)
+            p = self._proc
+            if p is None:
+                if not self._spawn():
+                    time.sleep(1.0)
+                    continue
+                p = self._proc
+            try:
+                buf = p.stdout.read(need)
+            except Exception:
+                buf = b""
             if not buf or len(buf) < need:
-                break
+                if not self._run:
+                    break
+                self._restarts += 1
+                print("[sharedmic] capture ended (restart #%d) — respawning arecord"
+                      % self._restarts, flush=True)
+                self._kill_proc()
+                time.sleep(0.25)          # let the device settle
+                continue
             with self._lock:
                 c = self._consumer
             if c is not None:
                 try:
                     c(buf)
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Never swallow silently: a consumer that throws on every
+                    # frame stalls the whole turn (no uplink, no END) and looks
+                    # exactly like a hang.
+                    if self._err_count < 5:
+                        self._err_count += 1
+                        print("[sharedmic] consumer error:", repr(e), flush=True)
 
     def stop(self):
         self._run = False
         with self._lock:
             self._consumer = None
-        p = self._proc
-        self._proc = None
-        if p:
-            try:
-                p.terminate()
-                p.wait(timeout=1)
-            except Exception:
-                try:
-                    p.kill()
-                except Exception:
-                    pass
+        self._kill_proc()
 
 
 class Player:
