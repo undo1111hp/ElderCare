@@ -1,10 +1,4 @@
 #!/bin/sh
 # Launcher for PTalk Signature native client.
 export PYTHONPATH="/opt/ptalk-signature:${PYTHONPATH}"
-# Prefer the app venv (carries openWakeWord for the "Bi ơi" hands-free wake word).
-# It is built with --system-site-packages, so PyQt6/picamera2 stay available.
-# Fall back to system python3 if the venv is absent — the app still runs, only
-# hands-free is disabled.
-PYBIN=/opt/ptalk-signature/venv/bin/python3
-[ -x "$PYBIN" ] || PYBIN=python3
-exec "$PYBIN" -m ptalk "$@"
+exec python3 -m ptalk "$@"

@@ -3,7 +3,9 @@
 Sản phẩm riêng trong hệ thống CloudPTalk. Một thiết bị Raspberry Pi 5 chạy app
 giọng nói, trò chuyện với "Ngân" (persona người cháu), **đọc thơ của chính bà**
 (RAG trên kho thơ Phan Ngọc Lan), nhắc lịch/thuốc, và quét thuốc bằng camera.
-Gọi bằng giọng — chỉ cần nói **"Bi ơi"**, không phải giữ nút.
+Nói chuyện bằng cách **giữ nút "Giữ để nói"**. (Gọi rảnh-tay "Bi ơi" đã làm xong và
+kiểm thử tốt, nhưng **tạm gác** vì micro ReSpeaker không chịu được việc bật thường
+trực — xem cảnh báo phần cứng ở cuối.)
 
 Toàn bộ phần server **cô lập tuyệt đối** với các dịch vụ đang chạy: dùng service
 mới `ptalk_signature` ở cổng **8005**, route nginx **/device/**, collection Qdrant
@@ -41,17 +43,17 @@ riêng **eldercare_poems** — KHÔNG sửa `llm_worker`/`tts_worker`/`stt_worke
 - `ptalk/` — mã nguồn: `config.py` (cấu hình), `voice_client.py` (VoiceEngine WS +
   parse khung chat JSON), `audio_io.py` (arecord/aplay + **auto-level/limiter loa**),
   `ui.py` (đa màn hình, khung chat "Bà vừa nói / Ngân", **màn WiFi + bàn phím ảo**),
-  `net.py` (WiFi/IP qua nmcli), **`wakeword.py`** (dò "Bi ơi" tại chỗ), **`vad.py`**
-  (tự biết lúc nói xong), `opus_codec.py`, `protocol.py`, `reminders.py`,
+  `net.py` (WiFi/IP qua nmcli),
+  `opus_codec.py`, `protocol.py`, `reminders.py`,
   `medicine.py`, `tts.py`, `__main__.py` (`--check`, `--screenshot`).
-- `models/` — `bi_oi.onnx` (model wake word đã huấn luyện). Hai file đặc trưng
+- `models/` — `bi_oi.onnx` (model wake word đã huấn luyện, GIỮ LẠI cho sau này; bản 0.6.1 đang chạy KHÔNG dùng tới).
   `melspectrogram.onnx`/`embedding_model.onnx` tải bằng `wakeword-training/setup.sh`
   rồi đặt cùng thư mục này trước khi build (không commit để repo khỏi nặng).
 - `pkg/` — control, postinst, launcher `/usr/bin/ptalk-signature`, `config.toml` mặc
   định (đã trỏ `/device/ws`, `output_gain=0.6`), service kiosk, `eldercare-nm.rules`
   (polkit cho netdev điều khiển WiFi từ kiosk).
 - `assets_src/` — ảnh nhân vật + logo.
-- `build_deb.sh` — build gói (VER hiện tại 0.7.0).
+- `build_deb.sh` — build gói (VER hiện tại 0.6.1).
 - **Cài đặt → "Kết nối / đổi WiFi"**: hiện IP + SSID đang dùng, quét mạng, chọn mạng,
   nhập mật khẩu bằng bàn phím ảo trên màn hình (không cần bàn phím rời) — dùng ngay
   trong kiosk, không phải thoát ra desktop.
@@ -59,18 +61,24 @@ riêng **eldercare_poems** — KHÔNG sửa `llm_worker`/`tts_worker`/`stt_worke
   mềm, **responsive** (cột giữa giới hạn bề rộng, không giãn xấu ở màn ngang), điều
   khiển bằng **segmented + thanh trượt âm lượng**. Thành phần dùng lại: `Card`,
   `IconBadge`, `Segmented`, `draw_glyph` (icon vẽ bằng QPainter, Pi không có font emoji).
-- **Gọi rảnh-tay "Bi ơi" (0.7.0)**: nói **"Bi ơi"** là máy tự nghe, không cần giữ nút.
-  Chạy **hoàn toàn tại chỗ, offline** (openWakeWord + ONNX Runtime trong venv riêng
-  `/opt/ptalk-signature/venv`) — **không có tiếng nào gửi lên server trước khi được gọi**.
-  - `wakeword.py` — bọc openWakeWord: hạ 48 kHz → 16 kHz qua **FIR streaming** (giữ
-    trạng thái giữa các khung 20 ms), ngưỡng + số lần liên tiếp + thời gian chờ.
-    Loader chấp nhận cả API openwakeword 0.4.x lẫn 0.5+.
-  - `vad.py` — tự nhận biết **nói xong** (im lặng ~1.3 s) để gửi `END`, vì không còn
-    nút để nhả; kèm huỷ lượt nếu gọi xong không nói gì.
-  - `audio_io.SharedMic` — **một luồng thu duy nhất** dùng chung: khi rảnh thì đưa cho
-    máy dò từ khoá, khi đang nói thì đưa cho bộ mã hoá Opus (ReSpeaker chỉ mở được 1
-    luồng thu). Nút **"Giữ để nói" vẫn hoạt động y như cũ**.
-  - Bật/tắt trong **Cài đặt → Gọi rảnh-tay**. Chỉnh nhạy trong `config.toml`.
+- **Sửa lỗi (0.6.1)**:
+  - **Nút "Dừng" giờ mới thật sự dừng.** Khi Ngân đang nói, nút chuyển sang chế độ
+    *chạm* (`hold=False`) nên `CircleButton` phát tín hiệu `clicked`, nhưng code chỉ
+    nối `pressedDown` → bấm không gọi được lệnh nào. Đã nối thêm `clicked`, và lệnh
+    dừng còn báo cả server ngừng sinh tiếp (`START_PCM_OUT`+`END`).
+  - **Câu trả lời dài không bị cụt nữa.** Hàng đợi phát chỉ chứa 4000 đoạn (~80 giây)
+    rồi **âm thầm vứt** phần dư (`put_nowait` + `except queue.Full: pass`). Nay giữ
+    ~10 phút và chặn nhẹ thay vì vứt. Đo lại: đẩy 150 giây tiếng vào → **0 đoạn bị mất**
+    (mã cũ mất ~3500).
+  - Chờ phát xong đúng cách: trần cũ 10 giây ngắn hơn cả câu trả lời dài nên màn hình
+    về "rảnh" trong khi loa còn đang đọc.
+  - `Player` tự dựng lại `aplay` nếu nó chết giữa chừng (tối đa 3 lần, giãn 1 giây).
+
+- **Gọi rảnh-tay "Bi ơi" — ĐÃ TẠM GÁC, không có trong bản đang chạy.** Mã + model +
+  pipeline huấn luyện vẫn còn (commit `425b9db`, `wakeword-training/`,
+  `pi-app/models/bi_oi.onnx`). Model chạy tốt (60/60 nhận đúng, 0 báo nhầm với 60 giây
+  tạp âm), nhưng nó cần **micro bật thường trực** — mà ReSpeaker Lite không chịu nổi
+  (xem cảnh báo phần cứng ở cuối). Muốn làm lại thì đọc kỹ mục đó trước.
 
 ### `server/` (dịch vụ /device)
 - `ptalk_signature/settings.py` — persona "Ngân" (gọi bà/xưng cháu), luật đọc thơ,
@@ -145,7 +153,7 @@ sudo ufw allow from 172.27.0.0/16 to any port 8005 proto tcp      # cho phép do
 ```bash
 # scp pi-app/ -> Pi:~/ptalk-native-src, đổi CRLF nếu build từ Windows:
 find . -type f \( -name '*.py' -o -name '*.sh' -o -name '*.toml' \) -exec sed -i 's/\r$//' {} +
-bash build_deb.sh && sudo dpkg -i ~/ptalk-build/ptalk-signature-native_0.7.0.deb
+bash build_deb.sh && sudo dpkg -i ~/ptalk-build/ptalk-signature-native_0.6.1.deb
 # tự chạy trong desktop labwc (không dùng cage vì desktop đã chiếm màn DSI):
 mkdir -p ~/.config/autostart && cp pkg autostart entry...   # đã cài; app tự bật khi boot
 ptalk-signature --check                                     # tự kiểm tra round-trip
@@ -154,15 +162,29 @@ ptalk-signature --check                                     # tự kiểm tra ro
 ## Ghi chú kỹ thuật quan trọng
 - **Loa ReSpeaker Lite chỉ 16 kHz, không có núm chỉnh** → hạ mức bằng phần mềm
   (`audio.output_gain=0.6` + limiter mềm trong `audio_io.Player`).
-- **Wake word cần venv riêng**: openWakeWord/onnxruntime không có trong kho Debian và
-  Debian trixie chặn `pip` cài thẳng vào hệ thống (PEP 668) → `/opt/ptalk-signature/venv`
-  tạo với `--system-site-packages` (vẫn thấy PyQt6/picamera2). Launcher `/usr/bin/ptalk-signature`
-  tự dùng venv nếu có, **không có thì vẫn chạy** bằng python hệ thống (chỉ mất rảnh-tay).
-- **Chỉnh độ nhạy "Bi ơi"** trong `/etc/ptalk-signature/config.toml`:
-  hay tự bật khi không gọi → tăng `threshold` (0.93/0.95) hoặc `trigger_hits = 3`;
-  gọi mà không nghe → giảm `threshold` (0.85) hoặc `trigger_hits = 1`.
-- **Máy không tự đánh thức bởi chính giọng của nó**: máy dò chỉ được bật lại sau khi
-  loa phát xong hẳn (`PLAYBACK_DONE`), không phải ngay lúc nhận `IDLE`.
+
+### ⚠️ ReSpeaker Lite (USB audio) rất dễ "chết" — đọc trước khi đụng vào âm thanh
+Thiết bị này **không chịu được** hai việc:
+1. **Mở lại luồng thu liên tục** (ví dụ vòng tự-bật-lại mỗi 0.25 s).
+2. **Mở thêm một nguồn phát trong khi đang thu** (ví dụ `aplay` riêng cho tiếng chuông,
+   hay để `espeak` tự phát).
+
+Cả hai đều làm nhân hệ điều hành hỏng hẳn giao tiếp USB:
+```
+usb 3-1: cannot submit urb 0, error -2: endpoint not enabled
+usb 3-1: 1:0: usb_set_interface failed (-71)
+usb 3-1: can't set config #1, error -71
+```
+Khi đó card **biến mất khỏi `arecord -l`** và **không lệnh phần mềm nào cứu được**
+(đã thử `authorized` toggle và unbind/bind `snd-usb-audio` — đều I/O error).
+**Chỉ rút phích cắm lại (hoặc tắt nguồn) mới khôi phục.**
+
+**Bẫy khi chẩn đoán:** máy đã hỏng vẫn hiện trong `lsusb`, và PipeWire vẫn cấp một
+nguồn thu **câm giả**. Nên "thu được N mẫu" KHÔNG chứng minh mic sống —
+**phải kiểm tra `peak > 0`**.
+
+Vì vậy 0.6.1 giữ nguyên tắc: **một `arecord` chỉ mở khi bấm nút**, **một `aplay` duy
+nhất**, không đóng/mở lại giữa chừng (kể cả khi bấm "Dừng" — chỉ xả hàng đợi).
 - **Đọc thơ = RECITE bypass** (bỏ qua LLM) để 100% nguyên văn + ngắt nghỉ từng dòng.
 - **Giờ**: L40S chạy UTC → `device_pipeline` bơm giờ Asia/Ho_Chi_Minh vào prompt.
 - **Không tự bịa thơ**: nếu kho không có, Ngân nói chưa có rồi hỏi lại (thác nước

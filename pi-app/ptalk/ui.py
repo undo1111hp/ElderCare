@@ -185,13 +185,6 @@ def draw_glyph(p, kind, cx, cy, s, color):
         p.setBrush(col); p.setPen(NP)
         p.drawEllipse(QtCore.QPointF(cx, cy - s * 0.24), s * 0.09, s * 0.09)
         p.setPen(pen); p.drawLine(QtCore.QPointF(cx, cy - s * 0.02), QtCore.QPointF(cx, cy + s * 0.34))
-    elif kind == "mic":
-        p.setPen(NP); p.setBrush(col)
-        p.drawRoundedRect(QtCore.QRectF(cx - s * 0.22, cy - s * 0.58, s * 0.44, s * 0.72), s * 0.22, s * 0.22)
-        p.setPen(pen); p.setBrush(NB)
-        p.drawArc(QtCore.QRectF(cx - s * 0.4, cy - s * 0.34, s * 0.8, s * 0.8), 200 * 16, 140 * 16)
-        p.drawLine(QtCore.QPointF(cx, cy + s * 0.42), QtCore.QPointF(cx, cy + s * 0.6))
-        p.drawLine(QtCore.QPointF(cx - s * 0.24, cy + s * 0.6), QtCore.QPointF(cx + s * 0.24, cy + s * 0.6))
 
 
 class IconBadge(QtWidgets.QWidget):
@@ -597,6 +590,10 @@ class HomeScreen(QtWidgets.QWidget):
         self.a_mic = ActionButton("mic", ACCENT, "Giữ để nói", 96, hold=True)
         self.a_mic.btn.pressedDown.connect(self._mic_down)
         self.a_mic.btn.releasedUp.connect(self._mic_up)
+        # While Ngân is speaking the button turns into "Dừng" and hold is set
+        # False — CircleButton then emits clicked, NOT pressedDown. Without this
+        # connection the stop button did nothing at all.
+        self.a_mic.btn.clicked.connect(self._mic_click)
         self.a_phone = ActionButton("phone", EMERGENCY, "Gọi khẩn cấp", 78)
         self.a_phone.btn.clicked.connect(self.app.emergency_call)
 
@@ -704,6 +701,13 @@ class HomeScreen(QtWidgets.QWidget):
     def _mic_up(self):
         if self.state == "recording":
             self.app.engine.talk_stop()
+
+    def _mic_click(self):
+        """A tap (not a hold) — the red 'Dừng' button while Ngân is speaking."""
+        if self.state in ("playing", "uploading"):
+            self.app.engine.cancel()
+            self._set_state("idle")
+            self.set_status("Cháu dừng rồi ạ")
 
 
 # ======================================================================
@@ -949,17 +953,6 @@ class SettingsScreen(SubScreen):
         vrow.addWidget(s1); vrow.addWidget(self.vol, 1); vrow.addWidget(s2)
         c.v.addLayout(vrow); col.addWidget(c)
 
-        # Gọi rảnh-tay ("Bi ơi")
-        c = Card(); c.header("mic", "#8E24AA", "Gọi rảnh-tay",
-                             "Nói “Bi ơi” là máy tự nghe — không cần giữ nút")
-        self.seg_wake = Segmented(["Tắt", "Bật"], 0)
-        self.seg_wake.changed.connect(lambda i: app.set_wakeword_enabled(i == 1))
-        c.v.addWidget(self.seg_wake)
-        self.wake_hint = QtWidgets.QLabel("")
-        self.wake_hint.setFont(H(13)); self.wake_hint.setWordWrap(True)
-        self.wake_hint.setStyleSheet(f"color:{MUTED};")
-        c.v.addWidget(self.wake_hint); col.addWidget(c)
-
         # Màn hình
         c = Card(); c.header("screen", "#1F9E8A", "Màn hình", "Hướng hiển thị")
         self.seg_rot = Segmented(["Dọc", "Ngang"], 0)
@@ -1003,19 +996,6 @@ class SettingsScreen(SubScreen):
         self.vol.blockSignals(True); self.vol.setValue(int(round(g * 100))); self.vol.blockSignals(False)
         rot = int(self.app.cfg.get("ui", {}).get("rotation", 0))
         self.seg_rot.set_current(1 if rot in (90, 270) else 0)
-        want = bool(self.app.cfg.get("wakeword", {}).get("enabled"))
-        self.seg_wake.set_current(1 if want else 0)
-        try:
-            st = self.app.engine.wake_status()
-        except Exception:
-            st = {"available": False}
-        if want and st.get("available"):
-            self.wake_hint.setText("Đang bật — hãy nói “Bi ơi” rồi nói yêu cầu của bà.")
-        elif want:
-            self.wake_hint.setText("Đã bật, nhưng máy chưa có mô hình “Bi ơi”. "
-                                   "Sẽ tự hoạt động ngay khi mô hình được nạp vào.")
-        else:
-            self.wake_hint.setText("Bật để gọi bằng giọng (“Bi ơi”) mà không cần chạm nút.")
         self.em_lbl.setText(self.app.cfg.get("emergency", {}).get("number", "115"))
         try:
             from . import net
@@ -1452,17 +1432,6 @@ class MainWindow(QtWidgets.QWidget):
             self.home.on_transcript(ev[len("CHAT_T:"):]); return
         if ev.startswith("CHAT_A:"):
             self.home.on_answer(ev[len("CHAT_A:"):]); return
-        if ev == "WAKE":
-            if self.stack.currentWidget() is not self.home:
-                self.navigate("home")
-            self.home._chat_a = ""
-            self.home._set_state("recording")
-            self.home.set_status("Cháu nghe đây… bà nói đi ạ")
-            return
-        if ev == "WAKE_NO_SPEECH":
-            self.home._set_state("idle")
-            self.home.set_status("Dạ, bà cần gì thì nói với cháu nhé")
-            return
         self.home.apply_voice_event(ev)
 
     def scan_medicine(self):
@@ -1532,15 +1501,6 @@ class MainWindow(QtWidgets.QWidget):
             self.engine.set_output_gain(g)
         except Exception:
             pass
-
-    def set_wakeword_enabled(self, on):
-        on = bool(on)
-        self.cfg.save_user("wakeword", {"enabled": on})
-        try:
-            self.engine.set_wakeword_enabled(on)
-        except Exception:
-            pass
-        self.settings.refresh()      # cập nhật dòng trạng thái ngay
 
     def _out(self):
         return self.cfg.get("display", {}).get("output", "DSI-2")

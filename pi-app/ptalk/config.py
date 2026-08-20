@@ -24,20 +24,6 @@ DEFAULTS = {
     },
     "camera": {"rotation": 180},
     "emergency": {"number": "115"},
-    # Gọi rảnh-tay bằng từ khoá "Bi ơi" (openWakeWord, chạy tại chỗ trên Pi).
-    # enabled=False cho tới khi có model + openwakeword; khi đó bật trong Cài đặt.
-    "wakeword": {
-        "enabled": True,
-        "model_path": "/opt/ptalk-signature/models/bi_oi.onnx",
-        # 0.9 + 2 lần liên tiếp: đo trên tập kiểm thử gần như không báo nhầm khi
-        # trong phòng có người nói chuyện bình thường, mà vẫn nghe được ~90%.
-        "threshold": 0.9,            # cao hơn = ít báo nhầm, khó gọi hơn
-        "trigger_hits": 2,           # cần mấy lần liên tiếp mới coi là gọi
-        "refractory_ms": 1800,       # khoảng chờ giữa 2 lần đánh thức
-        "silence_ms": 1300,          # im lặng bao lâu thì coi là nói xong
-        "lead_ms": 6000,             # gọi xong mà không nói gì -> huỷ lượt
-        "max_ms": 13000,             # trần một lượt nói
-    },
     "display": {"output": "DSI-2"},          # wlr-randr output name for rotate
     "tts": {"enabled": True},
     "ui": {

@@ -3,30 +3,11 @@ set -e
 
 case "$1" in
   configure)
-    # Hands-free "Bi ơi": openWakeWord runs in a dedicated venv (built with
-    # --system-site-packages so PyQt6/picamera2 stay visible). Best-effort and
-    # never fails the package install — if there's no internet now, install later:
-    #   sudo /opt/ptalk-signature/venv/bin/pip install openwakeword onnxruntime
-    VENV=/opt/ptalk-signature/venv
-    if [ ! -x "$VENV/bin/python3" ]; then
-      python3 -m venv --system-site-packages "$VENV" 2>/dev/null || true
-    fi
-    if [ -x "$VENV/bin/python3" ] && ! "$VENV/bin/python3" -c "import openwakeword" 2>/dev/null; then
-      "$VENV/bin/pip" install --quiet --upgrade pip 2>/dev/null || true
-      if timeout 1200 "$VENV/bin/pip" install --quiet openwakeword onnxruntime 2>/dev/null; then
-        echo " Hands-free wake word ready (openWakeWord)."
-      else
-        echo " (Optional) hands-free not installed yet — run when online:"
-        echo "   sudo $VENV/bin/pip install openwakeword onnxruntime"
-      fi
-    fi
-
     echo "-------------------------------------------------------------"
     echo " PTalk Signature (native) installed."
     echo "   Diagnostics : ptalk-signature --check"
     echo "   Run GUI     : ptalk-signature"
     echo "   Config      : /etc/ptalk-signature/config.toml"
-    echo "   Wake model  : /opt/ptalk-signature/models/bi_oi.onnx  (\"Bi ơi\")"
     echo "   Kiosk mode  : sudo systemctl enable --now ptalk-signature-kiosk"
     echo "-------------------------------------------------------------"
     ;;

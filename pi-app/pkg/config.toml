@@ -25,24 +25,6 @@ output_gain = 0.6
 [camera]
 rotation = 180                       # Camera Module 3 lắp ngược -> 180 (hflip+vflip)
 
-[wakeword]
-# Gọi rảnh-tay: nói "Bi ơi" là máy tự nghe (không cần giữ nút). Chạy hoàn toàn
-# tại chỗ trên Pi bằng openWakeWord (offline). enabled=false cho tới khi đã nạp
-# model /opt/ptalk-signature/models/bi_oi.onnx và cài openwakeword; rồi bật trong
-# Cài đặt (hoặc đổi thành true ở đây).
-enabled = true
-model_path = "/opt/ptalk-signature/models/bi_oi.onnx"
-# 0.9 + 2 lần liên tiếp: đo trên tập kiểm thử thì gần như không báo nhầm khi
-# trong phòng có người nói chuyện, mà vẫn nghe được ~90% số lần gọi.
-# Máy hay tự bật khi không gọi -> tăng threshold (0.93/0.95) hoặc trigger_hits=3.
-# Gọi mà máy không nghe -> giảm threshold (0.85) hoặc trigger_hits=1.
-threshold = 0.9                      # cao hơn = ít báo nhầm nhưng khó gọi hơn
-trigger_hits = 2                     # cần mấy lần liên tiếp mới coi là gọi
-refractory_ms = 1800                 # chờ giữa 2 lần đánh thức
-silence_ms = 1300                    # im lặng bấy nhiêu ms coi là nói xong -> gửi
-lead_ms = 6000                       # gọi xong không nói gì -> huỷ lượt
-max_ms = 13000                       # trần thời lượng một lượt nói
-
 [emergency]
 number = "115"                       # số gọi khẩn cấp khi bấm nút điện thoại
 
