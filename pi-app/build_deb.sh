@@ -2,7 +2,7 @@
 # Build the ptalk-signature-native .deb on the Pi (run from the source root).
 set -e
 SRC="$(cd "$(dirname "$0")" && pwd)"
-VER=0.6.0
+VER=0.7.0
 PKG=ptalk-signature-native
 OUT="$HOME/ptalk-build"
 STAGE="$OUT/${PKG}_${VER}"
@@ -20,6 +20,12 @@ install -m 644 "$SRC/ptalk/"*.py "$STAGE/opt/ptalk-signature/ptalk/"
 # bundle UI assets (character images + logos)
 install -d "$STAGE/opt/ptalk-signature/assets"
 install -m 644 "$SRC/assets_src/"*.png "$STAGE/opt/ptalk-signature/assets/"
+
+# wake-word model dir ("Bi ơi"); ship the model if it's been trained/placed here
+install -d "$STAGE/opt/ptalk-signature/models"
+if ls "$SRC/models/"*.onnx >/dev/null 2>&1; then
+    install -m 644 "$SRC/models/"*.onnx "$STAGE/opt/ptalk-signature/models/"
+fi
 
 install -d "$STAGE/usr/bin"
 install -m 755 "$SRC/pkg/ptalk-signature" "$STAGE/usr/bin/ptalk-signature"

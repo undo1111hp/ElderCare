@@ -49,6 +49,39 @@ def chime():
         pass
 
 
+def _ack_file():
+    """Short, gentle rising two-tone — the 'I'm listening' cue after 'Bi ơi'."""
+    path = "/tmp/ptalk_ack.wav"
+    if os.path.exists(path):
+        return path
+    sr = 48000
+    try:
+        with wave.open(path, "w") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+            data = bytearray()
+            for freq, dur in ((660, 0.09), (990, 0.12)):
+                n = int(sr * dur)
+                for i in range(n):
+                    env = math.sin(math.pi * i / n)        # smooth in/out
+                    v = int(4200 * env * math.sin(2 * math.pi * freq * i / sr))
+                    data += struct.pack("<h", v)
+            w.writeframes(bytes(data))
+    except Exception:
+        return None
+    return path
+
+
+def ack():
+    f = _ack_file()
+    if not f:
+        return
+    try:
+        subprocess.Popen(["aplay", "-q", f],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
 def speak(text, speed=150):
     if not _BIN or not text:
         return

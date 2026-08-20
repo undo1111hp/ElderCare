@@ -3,6 +3,7 @@
 Sản phẩm riêng trong hệ thống CloudPTalk. Một thiết bị Raspberry Pi 5 chạy app
 giọng nói, trò chuyện với "Ngân" (persona người cháu), **đọc thơ của chính bà**
 (RAG trên kho thơ Phan Ngọc Lan), nhắc lịch/thuốc, và quét thuốc bằng camera.
+Gọi bằng giọng — chỉ cần nói **"Bi ơi"**, không phải giữ nút.
 
 Toàn bộ phần server **cô lập tuyệt đối** với các dịch vụ đang chạy: dùng service
 mới `ptalk_signature` ở cổng **8005**, route nginx **/device/**, collection Qdrant
@@ -33,19 +34,24 @@ riêng **eldercare_poems** — KHÔNG sửa `llm_worker`/`tts_worker`/`stt_worke
 | `pi-app/` | App native trên Pi 5 (Python/PyQt6). Build thành `.deb`. |
 | `server/` | Service `/device` chạy trên L40S (clone cô lập của `ptalk_v2`). |
 | `poem-rag/` | Script nạp + truy vấn kho thơ vào Qdrant, kèm dữ liệu thơ đã xử lý. |
+| `wakeword-training/` | Pipeline huấn luyện từ khoá đánh thức **"Bi ơi"** (chạy trên L40S). |
 | `deploy/` | Tiện ích triển khai (chèn block nginx, test loa A/B). |
 
 ### `pi-app/` (client)
 - `ptalk/` — mã nguồn: `config.py` (cấu hình), `voice_client.py` (VoiceEngine WS +
   parse khung chat JSON), `audio_io.py` (arecord/aplay + **auto-level/limiter loa**),
   `ui.py` (đa màn hình, khung chat "Bà vừa nói / Ngân", **màn WiFi + bàn phím ảo**),
-  `net.py` (WiFi/IP qua nmcli), `opus_codec.py`, `protocol.py`, `reminders.py`,
+  `net.py` (WiFi/IP qua nmcli), **`wakeword.py`** (dò "Bi ơi" tại chỗ), **`vad.py`**
+  (tự biết lúc nói xong), `opus_codec.py`, `protocol.py`, `reminders.py`,
   `medicine.py`, `tts.py`, `__main__.py` (`--check`, `--screenshot`).
+- `models/` — `bi_oi.onnx` (model wake word đã huấn luyện). Hai file đặc trưng
+  `melspectrogram.onnx`/`embedding_model.onnx` tải bằng `wakeword-training/setup.sh`
+  rồi đặt cùng thư mục này trước khi build (không commit để repo khỏi nặng).
 - `pkg/` — control, postinst, launcher `/usr/bin/ptalk-signature`, `config.toml` mặc
   định (đã trỏ `/device/ws`, `output_gain=0.6`), service kiosk, `eldercare-nm.rules`
   (polkit cho netdev điều khiển WiFi từ kiosk).
 - `assets_src/` — ảnh nhân vật + logo.
-- `build_deb.sh` — build gói (VER hiện tại 0.6.0).
+- `build_deb.sh` — build gói (VER hiện tại 0.7.0).
 - **Cài đặt → "Kết nối / đổi WiFi"**: hiện IP + SSID đang dùng, quét mạng, chọn mạng,
   nhập mật khẩu bằng bàn phím ảo trên màn hình (không cần bàn phím rời) — dùng ngay
   trong kiosk, không phải thoát ra desktop.
@@ -53,6 +59,18 @@ riêng **eldercare_poems** — KHÔNG sửa `llm_worker`/`tts_worker`/`stt_worke
   mềm, **responsive** (cột giữa giới hạn bề rộng, không giãn xấu ở màn ngang), điều
   khiển bằng **segmented + thanh trượt âm lượng**. Thành phần dùng lại: `Card`,
   `IconBadge`, `Segmented`, `draw_glyph` (icon vẽ bằng QPainter, Pi không có font emoji).
+- **Gọi rảnh-tay "Bi ơi" (0.7.0)**: nói **"Bi ơi"** là máy tự nghe, không cần giữ nút.
+  Chạy **hoàn toàn tại chỗ, offline** (openWakeWord + ONNX Runtime trong venv riêng
+  `/opt/ptalk-signature/venv`) — **không có tiếng nào gửi lên server trước khi được gọi**.
+  - `wakeword.py` — bọc openWakeWord: hạ 48 kHz → 16 kHz qua **FIR streaming** (giữ
+    trạng thái giữa các khung 20 ms), ngưỡng + số lần liên tiếp + thời gian chờ.
+    Loader chấp nhận cả API openwakeword 0.4.x lẫn 0.5+.
+  - `vad.py` — tự nhận biết **nói xong** (im lặng ~1.3 s) để gửi `END`, vì không còn
+    nút để nhả; kèm huỷ lượt nếu gọi xong không nói gì.
+  - `audio_io.SharedMic` — **một luồng thu duy nhất** dùng chung: khi rảnh thì đưa cho
+    máy dò từ khoá, khi đang nói thì đưa cho bộ mã hoá Opus (ReSpeaker chỉ mở được 1
+    luồng thu). Nút **"Giữ để nói" vẫn hoạt động y như cũ**.
+  - Bật/tắt trong **Cài đặt → Gọi rảnh-tay**. Chỉnh nhạy trong `config.toml`.
 
 ### `server/` (dịch vụ /device)
 - `ptalk_signature/settings.py` — persona "Ngân" (gọi bà/xưng cháu), luật đọc thơ,
@@ -70,6 +88,33 @@ riêng **eldercare_poems** — KHÔNG sửa `llm_worker`/`tts_worker`/`stt_worke
 - `ingest_poems.py` — nạp vào Qdrant `eldercare_poems` (90 bài) + `eldercare_poem_lines`
   (590 đoạn), embed bge-m3 **trên CPU** (không đụng GPU). Tự merge `poem_themes.json`.
 - `query_poems.py` — test truy vấn ngữ nghĩa. `list_by_theme.py` — liệt kê theo chủ đề.
+
+### `wakeword-training/` (huấn luyện "Bi ơi")
+Không có sẵn model wake-word tiếng Việt, nên tự sinh dữ liệu + huấn luyện. Chạy trên
+L40S, **CPU-only** (GPU để dành cho production), toàn bộ trong `~/eldercare/wakeword`.
+
+| Script | Việc |
+|---|---|
+| `setup.sh` | venv riêng + tải `melspectrogram.onnx`/`embedding_model.onnx` + 3 giọng Piper tiếng Việt |
+| `gen_audio.py` | sinh **negative**: 68 cụm dễ nhầm ("bà ơi", "bơi", "mì ơi"...) + 900 câu thơ thật làm nền |
+| `gen_pos_v3.py` | sinh **positive** "Bi ơi" (giọng VIVOS **65 người nói** + 2 giọng khác, đổi tốc độ/âm sắc trong khoảng tự nhiên) |
+| `filter_stt.py` | **cổng chất lượng**: dùng ZipFormer STT nghe lại, CHỈ giữ clip thật sự nói "Bi ơi" (chấp nhận lệch thanh điệu bi/bì/bí/bị), và loại clip nào lỡ nói trúng từ khoá ra khỏi tập negative |
+| `train_ww.py` | tăng cường (vọng phòng, tạp âm theo SNR, low-pass giống đường tiếng của Pi) → đặc trưng (đa tiến trình) → huấn luyện → xuất `bi_oi.onnx` |
+| `eval_ww.py` | tách tỉ lệ báo nhầm theo từng nhóm + tác dụng của "N lần liên tiếp" |
+
+**Vì sao cần cổng STT:** lần sinh đầu quét tốc độ/nhiễu quá rộng, nghe lại thì chỉ ~5%
+số clip thật sự nói "Bi ơi" (còn lại méo thành "dạ", "bây giờ"...). Huấn luyện trên đó
+là dạy model sai âm. Siết lại tham số + lọc bằng STT cho **tỉ lệ giữ 49%** và
+**2582 clip positive đã kiểm chứng**.
+
+Kết quả trên máy Pi (ngưỡng 0.9, cần 2 lần liên tiếp), đo bằng dữ liệu để riêng:
+
+| Phép thử | Kết quả |
+|---|---|
+| Nghe ra "Bi ơi" | **60/60 (100%)** |
+| Báo nhầm với "bà ơi"/"bơi"/"mì ơi"... | 1/60 (1,7%) |
+| 60 giây tạp âm trắng / quạt / ù 50 Hz / im lặng | **0 lần báo nhầm** (mỗi loại) |
+| Tốn CPU khi nghe thường trực | ~1,5 ms mỗi khung 20 ms (**~7% của 1 lõi**) |
 
 ## Triển khai nhanh
 
@@ -100,7 +145,7 @@ sudo ufw allow from 172.27.0.0/16 to any port 8005 proto tcp      # cho phép do
 ```bash
 # scp pi-app/ -> Pi:~/ptalk-native-src, đổi CRLF nếu build từ Windows:
 find . -type f \( -name '*.py' -o -name '*.sh' -o -name '*.toml' \) -exec sed -i 's/\r$//' {} +
-bash build_deb.sh && sudo dpkg -i ~/ptalk-build/ptalk-signature-native_0.6.0.deb
+bash build_deb.sh && sudo dpkg -i ~/ptalk-build/ptalk-signature-native_0.7.0.deb
 # tự chạy trong desktop labwc (không dùng cage vì desktop đã chiếm màn DSI):
 mkdir -p ~/.config/autostart && cp pkg autostart entry...   # đã cài; app tự bật khi boot
 ptalk-signature --check                                     # tự kiểm tra round-trip
@@ -109,12 +154,35 @@ ptalk-signature --check                                     # tự kiểm tra ro
 ## Ghi chú kỹ thuật quan trọng
 - **Loa ReSpeaker Lite chỉ 16 kHz, không có núm chỉnh** → hạ mức bằng phần mềm
   (`audio.output_gain=0.6` + limiter mềm trong `audio_io.Player`).
+- **Wake word cần venv riêng**: openWakeWord/onnxruntime không có trong kho Debian và
+  Debian trixie chặn `pip` cài thẳng vào hệ thống (PEP 668) → `/opt/ptalk-signature/venv`
+  tạo với `--system-site-packages` (vẫn thấy PyQt6/picamera2). Launcher `/usr/bin/ptalk-signature`
+  tự dùng venv nếu có, **không có thì vẫn chạy** bằng python hệ thống (chỉ mất rảnh-tay).
+- **Chỉnh độ nhạy "Bi ơi"** trong `/etc/ptalk-signature/config.toml`:
+  hay tự bật khi không gọi → tăng `threshold` (0.93/0.95) hoặc `trigger_hits = 3`;
+  gọi mà không nghe → giảm `threshold` (0.85) hoặc `trigger_hits = 1`.
+- **Máy không tự đánh thức bởi chính giọng của nó**: máy dò chỉ được bật lại sau khi
+  loa phát xong hẳn (`PLAYBACK_DONE`), không phải ngay lúc nhận `IDLE`.
 - **Đọc thơ = RECITE bypass** (bỏ qua LLM) để 100% nguyên văn + ngắt nghỉ từng dòng.
 - **Giờ**: L40S chạy UTC → `device_pipeline` bơm giờ Asia/Ho_Chi_Minh vào prompt.
 - **Không tự bịa thơ**: nếu kho không có, Ngân nói chưa có rồi hỏi lại (thác nước
   poems-first; web fallback qua SearXNG là bước sau).
 - **Rollback**: tắt :8005, gỡ block nginx (khôi phục `nginx.conf.bak.*`), `ufw delete`,
   trỏ Pi về `/v2/ws`.
+
+### 4) Wake word "Bi ơi" (tuỳ chọn, nếu muốn huấn luyện lại)
+```bash
+# trên L40S — hoàn toàn tách biệt, CPU-only
+mkdir -p ~/eldercare/wakeword && cp wakeword-training/* ~/eldercare/wakeword/
+cd ~/eldercare/wakeword && bash setup.sh                       # venv + model + giọng Piper
+./venv/bin/python gen_audio.py                                 # negative + nền
+./venv/bin/python gen_pos_v3.py                                # positive "Bi ơi"
+./venv/bin/pip install sherpa-onnx
+CUDA_VISIBLE_DEVICES="" ./venv/bin/python filter_stt.py        # cổng chất lượng STT
+./venv/bin/python train_ww.py                                  # -> out/bi_oi.onnx
+./venv/bin/python eval_ww.py                                   # bảng báo nhầm theo nhóm
+# rồi copy out/bi_oi.onnx vào pi-app/models/ và build lại .deb
+```
 
 ## Việc còn lại (roadmap)
 - Nhắc lịch/thuốc bằng lời qua `/device` (server sinh `reminder_action`, Pi giữ lịch offline).

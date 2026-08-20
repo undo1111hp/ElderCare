@@ -62,6 +62,76 @@ class Recorder:
                     pass
 
 
+class SharedMic:
+    """One persistent arecord stream whose frames go to a *swappable* consumer.
+
+    The wake-word detector and the Opus uplink can't each open their own capture
+    stream (the ReSpeaker Lite exposes a single capture device), so they share
+    this one: when idle the consumer is the wake detector, during a turn it's the
+    uplink encoder. set_consumer(None) suspends delivery without closing the mic.
+    """
+
+    def __init__(self, device, sample_rate, channels, frame_bytes):
+        self.device = device
+        self.sr = sample_rate
+        self.ch = channels
+        self.frame_bytes = frame_bytes
+        self._proc = None
+        self._thread = None
+        self._run = False
+        self._consumer = None
+        self._lock = threading.Lock()
+
+    def set_consumer(self, fn):
+        with self._lock:
+            self._consumer = fn
+
+    def running(self):
+        return self._run
+
+    def start(self):
+        if self._run:
+            return
+        cmd = ["arecord", "-q", "-t", "raw", "-f", "S16_LE",
+               "-r", str(self.sr), "-c", str(self.ch), "-D", self.device]
+        self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                      stderr=subprocess.DEVNULL)
+        self._run = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        need = self.frame_bytes
+        rd = self._proc.stdout
+        while self._run:
+            buf = rd.read(need)
+            if not buf or len(buf) < need:
+                break
+            with self._lock:
+                c = self._consumer
+            if c is not None:
+                try:
+                    c(buf)
+                except Exception:
+                    pass
+
+    def stop(self):
+        self._run = False
+        with self._lock:
+            self._consumer = None
+        p = self._proc
+        self._proc = None
+        if p:
+            try:
+                p.terminate()
+                p.wait(timeout=1)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+
+
 class Player:
     """Buffered PCM16 playback. write() enqueues; a thread pumps into aplay."""
 
