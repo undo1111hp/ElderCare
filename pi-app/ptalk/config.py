@@ -23,6 +23,17 @@ DEFAULTS = {
         "output_gain": 0.6,
     },
     "camera": {"rotation": 180},
+    # Goi ranh-tay bang tu khoa "Bi oi" (openWakeWord, chay tai cho tren Pi).
+    "wakeword": {
+        "enabled": False,
+        "model_path": "/opt/ptalk-signature/models/bi_oi.onnx",
+        "threshold": 0.9,
+        "trigger_hits": 2,
+        "refractory_ms": 1800,
+        "silence_ms": 1300,
+        "lead_ms": 6000,
+        "max_ms": 13000,
+    },
     "emergency": {"number": "115"},
     "display": {"output": "DSI-2"},          # wlr-randr output name for rotate
     "tts": {"enabled": True},

@@ -3,12 +3,38 @@ set -e
 
 case "$1" in
   configure)
+    VENV=/opt/ptalk-signature/venv
+    # Hands-free "Bi ơi" needs openWakeWord, which is not in Debian and cannot be
+    # pip-installed system-wide on trixie (PEP 668). Use a dedicated venv built
+    # with --system-site-packages so PyQt6/picamera2 stay visible. Best-effort:
+    # never fail the install — without it the app still runs, just without
+    # hands-free.
+    if [ ! -x "$VENV/bin/python3" ]; then
+      python3 -m venv --system-site-packages "$VENV" 2>/dev/null || true
+    fi
+    if [ -x "$VENV/bin/python3" ] && ! "$VENV/bin/python3" -c "import openwakeword" 2>/dev/null; then
+      "$VENV/bin/pip" install --quiet --upgrade pip 2>/dev/null || true
+      if timeout 1800 "$VENV/bin/pip" install --quiet openwakeword onnxruntime 2>/dev/null; then
+        echo " Hands-free wake word ready (openWakeWord)."
+      else
+        echo " (Optional) hands-free not installed — run when online:"
+        echo "   sudo $VENV/bin/pip install openwakeword onnxruntime"
+      fi
+    fi
+
+    # Apply the ReSpeaker no-suspend rule now (it also loads on next login).
+    # This is what keeps the USB audio device from being wedged.
+    if [ -n "$SUDO_USER" ]; then
+      su - "$SUDO_USER" -c 'XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart wireplumber' 2>/dev/null || true
+    fi
+
     echo "-------------------------------------------------------------"
     echo " PTalk Signature (native) installed."
     echo "   Diagnostics : ptalk-signature --check"
     echo "   Run GUI     : ptalk-signature"
     echo "   Config      : /etc/ptalk-signature/config.toml"
-    echo "   Kiosk mode  : sudo systemctl enable --now ptalk-signature-kiosk"
+    echo "   Wake model  : /opt/ptalk-signature/models/bi_oi.onnx  (\"Bi ơi\")"
+    echo "   Hands-free  : Cài đặt -> Gọi rảnh-tay"
     echo "-------------------------------------------------------------"
     ;;
 esac

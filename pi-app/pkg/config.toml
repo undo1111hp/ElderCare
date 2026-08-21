@@ -32,3 +32,16 @@ number = "115"                       # số gọi khẩn cấp khi bấm nút đ
 fullscreen = true
 font_scale = 1.15                    # người già: chữ to; tăng 1.3–1.5 nếu cần
 rotation = 0                         # 0/90/180/270 — nút Xoay cộng dồn 90° mỗi lần
+
+[wakeword]
+# Gọi rảnh-tay: nói "Bi ơi" là máy tự nghe (không cần giữ nút). Chạy hoàn toàn
+# tại chỗ trên Pi bằng openWakeWord (offline) — không gửi tiếng nào lên server
+# trước khi được gọi. Bật/tắt trong Cài đặt → Gọi rảnh-tay.
+enabled = true
+model_path = "/opt/ptalk-signature/models/bi_oi.onnx"
+threshold = 0.9                      # cao hơn = ít báo nhầm nhưng khó gọi hơn
+trigger_hits = 2                     # cần mấy lần liên tiếp mới coi là gọi
+refractory_ms = 1800                 # chờ giữa 2 lần đánh thức
+silence_ms = 1300                    # im lặng bấy nhiêu ms coi là nói xong -> gửi
+lead_ms = 6000                       # gọi xong không nói gì -> huỷ lượt
+max_ms = 13000                       # trần thời lượng một lượt nói

@@ -2,7 +2,7 @@
 # Build the ptalk-signature-native .deb on the Pi (run from the source root).
 set -e
 SRC="$(cd "$(dirname "$0")" && pwd)"
-VER=0.6.1
+VER=0.7.2
 PKG=ptalk-signature-native
 OUT="$HOME/ptalk-build"
 STAGE="$OUT/${PKG}_${VER}"
@@ -20,6 +20,16 @@ install -m 644 "$SRC/ptalk/"*.py "$STAGE/opt/ptalk-signature/ptalk/"
 # bundle UI assets (character images + logos)
 install -d "$STAGE/opt/ptalk-signature/assets"
 install -m 644 "$SRC/assets_src/"*.png "$STAGE/opt/ptalk-signature/assets/"
+
+# wake-word model ("Bi ơi") — shipped only if present in models/
+install -d "$STAGE/opt/ptalk-signature/models"
+if ls "$SRC/models/"*.onnx >/dev/null 2>&1; then
+    install -m 644 "$SRC/models/"*.onnx "$STAGE/opt/ptalk-signature/models/"
+fi
+
+# WirePlumber: never suspend the ReSpeaker (see the file for why)
+install -d "$STAGE/usr/share/wireplumber/wireplumber.conf.d"
+install -m 644 "$SRC/pkg/51-respeaker-no-suspend.conf"     "$STAGE/usr/share/wireplumber/wireplumber.conf.d/51-respeaker-no-suspend.conf"
 
 install -d "$STAGE/usr/bin"
 install -m 755 "$SRC/pkg/ptalk-signature" "$STAGE/usr/bin/ptalk-signature"

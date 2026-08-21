@@ -11,11 +11,29 @@ cancel are thread-safe and can be called from the Qt UI thread.
 """
 import asyncio
 import json
+import os
 import threading
+import time as _time
 
 from .opus_codec import OpusEncoder
 from .protocol import pack_frame, unpack_frames
-from .audio_io import Recorder, Player
+from .audio_io import SharedMic, Player
+from .wakeword import WakeWord
+from .vad import Endpointer
+from . import tts
+
+_DEBUG = os.environ.get("PTALK_WAKE_DEBUG") == "1"
+_DEBUG_PATH = os.environ.get("PTALK_WAKE_LOG", "/tmp/ptalk_wake.log")
+
+
+def _dlog(msg):
+    if not _DEBUG:
+        return
+    try:
+        with open(_DEBUG_PATH, "a") as f:
+            f.write("%s %s" % (_time.strftime("%H:%M:%S"), msg) + chr(10))
+    except Exception:
+        pass
 
 
 class VoiceEngine:
@@ -34,12 +52,40 @@ class VoiceEngine:
         self._thread = None
         self.ws = None
         self._sendq = None
-        self._recorder = None
+        self._mic = SharedMic(self._in_dev, self.sr, self.ch, self.frame_bytes)
         self._player = Player(self._out_dev, self.sr, self.ch,
                               gain=a.get("output_gain", 0.6))
         self._accepting = False
         self._talking = False
         self._closing = False
+
+        # ---- hands-free wake word ("Bi oi") ----
+        w = dict(cfg.get("wakeword", {}) or {})
+        self._ww_cfg = w
+        self._hands_free = False     # is the CURRENT turn hands-free?
+        self._ending = False         # endpointer already asked to stop?
+        self._local_reply = False    # a local (espeak) reply is playing
+        self._frames_sent = 0
+        self._enc_errs = 0
+        self._turn_id = 0
+        self._wake = None
+        self._always_on = False
+        self._endpoint = Endpointer(
+            frame_ms=a.get("frame_ms", 20),
+            silence_ms=w.get("silence_ms", 1300),
+            lead_ms=w.get("lead_ms", 6000),
+            max_ms=w.get("max_ms", 13000))
+        if w.get("enabled"):
+            self._wake = self._make_wake()
+            self._always_on = self._wake.available()
+
+    def _make_wake(self):
+        w = self._ww_cfg
+        return WakeWord(
+            w.get("model_path"), self._on_wake_detected,
+            threshold=w.get("threshold", 0.9), src_rate=self.sr,
+            refractory_ms=w.get("refractory_ms", 1800),
+            trigger_hits=w.get("trigger_hits", 2))
 
     # ---------------- lifecycle ----------------
     def start(self):
@@ -86,6 +132,11 @@ class VoiceEngine:
         }))
         self._emit("CONNECTED")
         self._loop.create_task(self._sender())
+        # Open capture AND playback once, here, and keep both for the whole
+        # session. Opening/closing them mid-session is what renegotiates this
+        # USB device and wedges it.
+        self._player.start()
+        self._loop.call_soon(self._rearm_wake)
 
     async def _sender(self):
         while True:
@@ -137,6 +188,7 @@ class VoiceEngine:
             waited += 0.05
         await asyncio.sleep(0.7)          # aplay/ALSA still holds ~0.5 s
         self._emit("PLAYBACK_DONE")
+        self._rearm_wake()                # only now is it safe to listen again
 
     def _emit(self, ev):
         try:
@@ -164,63 +216,208 @@ class VoiceEngine:
         except Exception:
             pass
 
+    # ---------------- mic sharing / wake arming ----------------
+    def _ensure_streams(self):
+        """Both streams must be open. alive() checks the reader thread, not just
+        a flag — a dead thread with the flag set once made turns hang silently."""
+        if not self._mic.alive():
+            try:
+                self._mic.stop()
+            except Exception:
+                pass
+            self._mic.start()
+            _dlog("[turn] mic (re)started alive=%s" % self._mic.alive())
+        self._player.start()          # no-op if already running
+
+    def _rearm_wake(self):
+        """Back to idle: point the shared mic at the wake detector.
+
+        With hands-free off this is a no-op and the mic is only opened while the
+        talk button is held — exactly the 0.6.1 behaviour."""
+        if self._local_reply:
+            return                    # a local spoken reply is still playing
+        self._ending = False
+        self._hands_free = False
+        if self._always_on and self._wake and self._wake.available() and not self._talking:
+            self._endpoint.reset()
+            self._wake.reset()
+            self._wake.mute(False)
+            self._ensure_streams()
+            self._mic.set_consumer(self._wake_consumer)
+
+    # ---------------- mic consumers (called on the mic thread) ----------------
+    def _wake_consumer(self, buf):
+        if self._wake:
+            self._wake.feed(buf)
+
+    def _uplink_consumer(self, buf):
+        try:
+            packed = pack_frame(self._enc.encode(buf))
+        except Exception as e:
+            packed = None
+            if self._enc_errs < 3:
+                self._enc_errs += 1
+                _dlog("[turn]   ENCODE FAILED: %r" % (e,))
+        if packed is not None:
+            self._loop.call_soon_threadsafe(self._sendq.put_nowait, packed)
+            self._frames_sent += 1
+            if self._frames_sent in (1, 50, 150):
+                _dlog("[turn]   uplink frames=%d" % self._frames_sent)
+        if self._hands_free and not self._ending:
+            reason = self._endpoint.feed(buf)
+            if reason:
+                self._ending = True
+                _dlog("[turn]   endpoint -> %s (frames=%d)" % (reason, self._frames_sent))
+                if reason == "no_speech":
+                    asyncio.run_coroutine_threadsafe(self._abort_no_speech(), self._loop)
+                else:
+                    asyncio.run_coroutine_threadsafe(self._talk_stop(), self._loop)
+
+    # ---------------- wake -> hands-free turn ----------------
+    def _on_wake_detected(self, score):
+        if self._loop:
+            asyncio.run_coroutine_threadsafe(self._begin_hands_free(score), self._loop)
+
+    async def _begin_hands_free(self, score):
+        _dlog("[turn] begin_hands_free score=%.3f talking=%s" % (score, self._talking))
+        if self._talking or self._closing or self.ws is None:
+            return
+        if self._wake:
+            self._wake.mute(True)
+        self._mic.set_consumer(None)
+        self._emit("WAKE")
+        # Play the blip through the player we already own. A second aplay client
+        # would reconfigure this USB device and kill the capture stream.
+        try:
+            self._player.start()
+            self._player.write(tts.ack_pcm(self.sr))
+        except Exception as e:
+            _dlog("[turn]   ack failed: %r" % (e,))
+        # Capture after the blip so it is not heard as the first words. await,
+        # not call_later: a callback that raises would vanish into the loop's
+        # exception handler and the turn would hang forever.
+        await asyncio.sleep(0.5)
+        try:
+            await self._do_talk_start(True)
+        except Exception as e:
+            _dlog("[turn]   do_talk_start RAISED: %r" % (e,))
+            self._talking = False
+            self._emit("ERR:wake:%s" % e)
+            self._rearm_wake()
+
+    async def _abort_no_speech(self):
+        """Called by name with nothing after it.
+
+        Do not ship the silence to the server. The protocol has no CANCEL, but a
+        fresh START clears the server's buffer, so START+END abandons the turn
+        using only commands it knows. Answer locally so being called always gets
+        a reply."""
+        if not self._talking:
+            return
+        self._talking = False
+        self._hands_free = False
+        self._mic.set_consumer(None)
+        self._local_reply = True
+        if self._wake:
+            self._wake.mute(True)
+        await self._sendq.put("START_PCM_OUT")
+        await self._sendq.put("END")
+        self._emit("WAKE_NO_SPEECH")
+        msg = "Da, ba can gi thi noi voi chau nhe"
+        try:
+            pcm = await self._loop.run_in_executor(None, tts.speak_pcm, msg, self.sr)
+            if pcm:
+                self._player.write(pcm)      # reuse the one output client
+        except Exception as e:
+            _dlog("[turn]   local reply failed: %r" % (e,))
+        await asyncio.sleep(3.0)
+        self._local_reply = False
+        self._rearm_wake()
+
+    async def _turn_watchdog(self, turn_id):
+        """Backstop: the endpointer only runs while mic frames keep arriving, so
+        if that ever stalls the device would sit in 'listening' forever."""
+        await asyncio.sleep(self._ww_cfg.get("max_ms", 13000) / 1000.0 + 3.0)
+        if self._talking and self._hands_free and self._turn_id == turn_id:
+            _dlog("[turn]   WATCHDOG: stuck (frames=%d) -> forcing END" % self._frames_sent)
+            self._ending = True
+            await self._talk_stop()
+
+    # ---------------- start / stop a turn ----------------
     async def _talk_start(self):
+        await self._do_talk_start(False)
+
+    async def _do_talk_start(self, hands_free):
+        _dlog("[turn] talk_start hands_free=%s talking=%s" % (hands_free, self._talking))
         if self._talking or self.ws is None:
             return
         self._talking = True
         self._accepting = True
-        self._player.start()
-        try:
-            await self.ws.send("START_PCM_OUT")
-        except Exception as e:
-            self._emit(f"ERR:{e}")
-            self._talking = False
-            return
-
-        def on_frame(buf):
-            try:
-                packed = pack_frame(self._enc.encode(buf))
-            except Exception:
-                return
-            self._loop.call_soon_threadsafe(self._sendq.put_nowait, packed)
-
-        self._recorder = Recorder(self._in_dev, self.sr, self.ch,
-                                  self.frame_bytes, on_frame)
-        try:
-            self._recorder.start()
-        except Exception as e:
-            self._emit(f"ERR:mic:{e}")
+        self._hands_free = hands_free
+        self._ending = False
+        self._frames_sent = 0
+        if self._wake:
+            self._wake.mute(True)
+        if hands_free:
+            self._endpoint.reset()
+        self._ensure_streams()
+        # Queue the command; never send on the socket from two places at once.
+        await self._sendq.put("START_PCM_OUT")
+        self._mic.set_consumer(self._uplink_consumer)
+        _dlog("[turn]   uplink armed (mic alive=%s)" % self._mic.alive())
+        if hands_free:
+            self._turn_id += 1
+            self._loop.create_task(self._turn_watchdog(self._turn_id))
 
     async def _talk_stop(self):
         if not self._talking:
             return
         self._talking = False
-        if self._recorder:
-            await self._loop.run_in_executor(None, self._recorder.stop)
-            self._recorder = None
-        # queued opus frames flush first (FIFO), then END
+        self._mic.set_consumer(None)      # stop the uplink; streams stay open
         await self._sendq.put("END")
 
     async def _cancel(self):
         self._accepting = False
         self._talking = False
-        if self._recorder:
-            await self._loop.run_in_executor(None, self._recorder.stop)
-            self._recorder = None
+        self._ending = False
+        self._mic.set_consumer(None)
         # Dropping the queue silences it within the ~0.5 s already inside aplay.
-        # Deliberately do NOT stop the player: tearing the playback client down
-        # and reopening it renegotiates this USB audio device, which has wedged
-        # capture before (kernel: usb_set_interface failed (-71)).
+        # Deliberately do NOT stop the player.
         self._player.flush()
-        # Tell the server to abandon the turn as well, otherwise it keeps
-        # generating and streaming audio we would only throw away. A fresh START
-        # cancels the in-flight request; END on the empty buffer returns IDLE.
         try:
             await self._sendq.put("START_PCM_OUT")
             await self._sendq.put("END")
         except Exception:
             pass
         self._emit("CANCELLED")
+        self._rearm_wake()
+
+    # ---------------- wake toggle (from Settings) ----------------
+    def wake_status(self):
+        return {
+            "enabled": bool(self._always_on),
+            "available": bool(self._wake and self._wake.available()),
+            "configured": bool(self._ww_cfg.get("model_path")),
+        }
+
+    def set_wakeword_enabled(self, on):
+        if self._loop:
+            asyncio.run_coroutine_threadsafe(self._set_ww(bool(on)), self._loop)
+
+    async def _set_ww(self, on):
+        if on:
+            if self._wake is None:
+                self._wake = self._make_wake()
+            self._always_on = self._wake.available()
+            self._rearm_wake()
+        else:
+            self._always_on = False
+            if self._wake:
+                self._wake.mute(True)
+            if not self._talking:
+                self._mic.set_consumer(None)
+                # Keep the stream OPEN even when hands-free is off: closing it is
+                # what damages this device. An idle stream costs nothing.
 
     def shutdown(self):
         self._closing = True
@@ -234,11 +431,10 @@ class VoiceEngine:
             self._player.stop()
         except Exception:
             pass
-        if self._recorder:
-            try:
-                self._recorder.stop()
-            except Exception:
-                pass
+        try:
+            self._mic.stop()
+        except Exception:
+            pass
 
         async def _close():
             try:
