@@ -747,6 +747,186 @@ class SubScreen(QtWidgets.QWidget):
 
 
 # ======================================================================
+#  Live camera screen (aim the pill before shooting)
+# ======================================================================
+class PreviewView(QtWidgets.QWidget):
+    """Camera frame + an aiming guide drawn on top.
+
+    Fills by expanding and centre-cropping rather than letterboxing: black bars
+    read as "broken screen" to an elderly user, a filled frame does not."""
+
+    def __init__(self):
+        super().__init__()
+        self.setMinimumHeight(280)
+        self._img = None
+        self._msg = "Đang mở camera…"
+
+    def set_frame(self, img):
+        self._img = img
+        self.update()
+
+    def set_message(self, msg):
+        self._img = None
+        self._msg = msg
+        self.update()
+
+    def paintEvent(self, _):
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        r = self.rect()
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(QtCore.QRectF(r), 22, 22)
+        p.setClipPath(path)
+        p.fillRect(r, QtGui.QColor("#1B1B1D"))
+
+        if self._img is None:
+            p.setPen(QtGui.QColor("#DDDDDD")); p.setFont(H(17))
+            p.drawText(r, QtCore.Qt.AlignmentFlag.AlignCenter, self._msg)
+            return
+
+        scaled = self._img.scaled(r.size(),
+                                  QtCore.Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                  QtCore.Qt.TransformationMode.SmoothTransformation)
+        p.drawImage(QtCore.QPoint((r.width() - scaled.width()) // 2,
+                                  (r.height() - scaled.height()) // 2), scaled)
+
+        side = int(min(r.width(), r.height()) * 0.64)
+        guide = QtCore.QRect(r.center().x() - side // 2, r.center().y() - side // 2, side, side)
+
+        # Dim everything outside the guide so the target square is unmistakable.
+        outside = QtGui.QPainterPath(); outside.addRect(QtCore.QRectF(r))
+        inner = QtGui.QPainterPath(); inner.addRoundedRect(QtCore.QRectF(guide), 20, 20)
+        p.fillPath(outside.subtracted(inner), QtGui.QColor(0, 0, 0, 105))
+
+        pen = QtGui.QPen(QtGui.QColor(GREEN_OK)); pen.setWidth(5)
+        p.setPen(pen); p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(guide, 20, 20)
+
+        # Corner ticks — a plain rectangle reads as decoration, ticks read as
+        # "put it here".
+        pen.setWidth(9); pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap); p.setPen(pen)
+        t = max(18, side // 7)
+        for cx, cy, dx, dy in ((guide.left(), guide.top(), 1, 1),
+                               (guide.right(), guide.top(), -1, 1),
+                               (guide.left(), guide.bottom(), 1, -1),
+                               (guide.right(), guide.bottom(), -1, -1)):
+            p.drawLine(cx + dx * 14, cy, cx + dx * t, cy)
+            p.drawLine(cx, cy + dy * 14, cx, cy + dy * t)
+
+
+class CameraScreen(SubScreen):
+    """Aim-then-shoot medicine scan.
+
+    Replaces the old blind capture: the sensor stays open while the user lines
+    the blister up inside the guide, and the shot is taken from that same
+    stream, so the preview is a true representation of what gets analysed."""
+
+    def __init__(self, app):
+        super().__init__(app, "Quét thuốc")
+        self._cam = None
+        self._sig = _EventSignal(); self._sig.event.connect(self._on_status)
+
+        self.hint = QtWidgets.QLabel("Đưa vỉ thuốc vào giữa khung xanh, rồi bấm “Chụp ảnh”.")
+        self.hint.setFont(H(18)); self.hint.setWordWrap(True)
+        self.hint.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.hint.setStyleSheet(f"color:{INK};")
+        self.root.addWidget(self.hint)
+
+        self.view = PreviewView()
+        self.root.addWidget(self.view, 1)
+
+        self.status = QtWidgets.QLabel("")
+        self.status.setFont(H(16)); self.status.setWordWrap(True)
+        self.status.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.status.setStyleSheet(f"color:{MUTED};")
+        self.root.addWidget(self.status)
+
+        self.btn_shot = pill_button("📷  Chụp ảnh", GREEN_OK, min_h=78, pt=20)
+        self.btn_shot.clicked.connect(self.do_capture)
+        self.root.addWidget(self.btn_shot)
+
+        self._timer = QtCore.QTimer(self)
+        self._timer.timeout.connect(self._tick)
+
+    # ---------- lifecycle ----------
+    def start(self):
+        self.stop()              # idempotent: never orphan a running sensor
+        self.status.setText("")
+        if not medicine.camera_available():
+            self._no_camera()
+            return
+        try:
+            self._cam = medicine.CameraPreview(int(self.app.cfg["camera"]["rotation"]))
+            self._cam.start()
+        except Exception as e:
+            self._cam = None
+            self._no_camera(str(e))
+            return
+        self.hint.setText("Đưa vỉ thuốc vào giữa khung xanh, rồi bấm “Chụp ảnh”.")
+        self.btn_shot.setEnabled(True); self.btn_shot.setVisible(True)
+        self._timer.start(66)          # ~15 fps is plenty to aim by
+
+    def stop(self):
+        self._timer.stop()
+        cam, self._cam = self._cam, None
+        if cam is not None:
+            cam.stop()
+        self.view.set_message("Đang mở camera…")
+
+    def _no_camera(self, detail=""):
+        self._timer.stop()
+        self.hint.setText("Máy chưa nhận được camera.")
+        self.view.set_message("Không có camera")
+        self.status.setText("Nhờ người nhà kiểm tra dây camera giúp bà nhé."
+                            + (("\n(%s)" % detail) if detail else ""))
+        self.btn_shot.setEnabled(False); self.btn_shot.setVisible(False)
+
+    # ---------- preview ----------
+    def _tick(self):
+        if self._cam is None:
+            return
+        try:
+            arr = self._cam.frame()
+        except Exception as e:
+            self._no_camera(str(e)); return
+        if arr is None:
+            return
+        h, w = arr.shape[0], arr.shape[1]
+        # picamera2's "RGB888" is B,G,R in memory — hence Format_BGR888.
+        img = QtGui.QImage(arr.data, w, h, arr.strides[0],
+                           QtGui.QImage.Format.Format_BGR888).copy()
+        self.view.set_frame(img)
+
+    # ---------- capture ----------
+    def do_capture(self):
+        if self._cam is None:
+            return
+        # Stop the timer first: capture runs on a worker thread and picamera2
+        # must not be driven from two threads at once.
+        self._timer.stop()
+        self.btn_shot.setEnabled(False)
+        self.status.setText("Đang chụp ảnh…")
+        threading.Thread(target=self._capture_worker, daemon=True).start()
+
+    def _capture_worker(self):
+        cam = self._cam
+        try:
+            path = "/tmp/ptalk_medicine.jpg"
+            cam.capture(path)
+            # Release the sensor before the upload: analysis can take up to a
+            # minute and there is no reason to hold the camera through it.
+            cam.stop()
+            self._sig.event.emit("Đang phân tích thuốc…")
+            txt = medicine.analyze_medicine(path, self.app.cfg["server"]["aitools_url"])
+            self.app._sig.event.emit("MED_RESULT:" + (txt or "Không nhận diện được thuốc."))
+        except Exception as e:
+            self.app._sig.event.emit("MED_RESULT:Lỗi khi quét thuốc: %s" % e)
+
+    def _on_status(self, msg):
+        self.status.setText(msg)
+
+
+# ======================================================================
 #  Medicine result screen
 # ======================================================================
 class MedicineScreen(SubScreen):
@@ -1387,11 +1567,12 @@ class MainWindow(QtWidgets.QWidget):
         self.stack.setStyleSheet("background:transparent;")
         self.home = HomeScreen(self)
         self.med = MedicineScreen(self)
+        self.cam = CameraScreen(self)
         self.reminders = RemindersScreen(self)
         self.addrem = AddReminderScreen(self)
         self.settings = SettingsScreen(self)
         self.wifi = WiFiScreen(self)
-        for s in (self.home, self.med, self.reminders, self.addrem, self.settings, self.wifi):
+        for s in (self.home, self.med, self.cam, self.reminders, self.addrem, self.settings, self.wifi):
             s.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
             self.stack.addWidget(s)
         self.alarm = AlarmOverlay(self)
@@ -1413,13 +1594,18 @@ class MainWindow(QtWidgets.QWidget):
     # ---------- navigation ----------
     def navigate(self, name):
         target = {"home": self.home, "medicine": self.med, "reminders": self.reminders,
+                  "camera": self.cam,
                   "add": self.addrem, "settings": self.settings, "wifi": self.wifi}.get(name, self.home)
+        if self.stack.currentWidget() is self.cam and target is not self.cam:
+            self.cam.stop()          # free the sensor when leaving
         if name == "reminders": self.reminders.refresh()
         if name == "add": self.addrem.reset()
         if name == "settings": self.settings.refresh()
         if name == "wifi": self.wifi.refresh()
         if name == "home": self.home.info.set_state(self.home.state)
         self.stack.setCurrentWidget(target)
+        if target is self.cam:
+            self.cam.start()
 
     # ---------- background ----------
     def paintEvent(self, _):
@@ -1477,19 +1663,8 @@ class MainWindow(QtWidgets.QWidget):
         self.home.apply_voice_event(ev)
 
     def scan_medicine(self):
-        self.home.a_med.btn.setEnabled(False)
-        self.home.set_status("Đang chụp ảnh thuốc...")
-        threading.Thread(target=self._scan_worker, daemon=True).start()
-
-    def _scan_worker(self):
-        try:
-            path = "/tmp/ptalk_medicine.jpg"
-            medicine.capture_jpeg(path, self.cfg["camera"]["rotation"])
-            self._sig.event.emit("MED_STATUS:Đang phân tích thuốc...")
-            txt = medicine.analyze_medicine(path, self.cfg["server"]["aitools_url"])
-            self._sig.event.emit("MED_RESULT:" + (txt or "Không nhận diện được thuốc."))
-        except Exception as e:
-            self._sig.event.emit("MED_RESULT:Lỗi khi quét thuốc: %s" % e)
+        """Show the live preview so the pill can be aimed; CameraScreen shoots."""
+        self.navigate("camera")
 
     def emergency_call(self):
         num = self.cfg.get("emergency", {}).get("number", "115")
@@ -1569,11 +1744,13 @@ class MainWindow(QtWidgets.QWidget):
 
     def _rebuild_screens(self):
         cur = self.stack.currentIndex()
-        old = [self.home, self.med, self.reminders, self.addrem, self.settings, self.wifi]
+        old = [self.home, self.med, self.cam, self.reminders, self.addrem, self.settings, self.wifi]
+        self.cam.stop()          # do not leak the sensor across a rebuild
         self.home = HomeScreen(self); self.med = MedicineScreen(self)
+        self.cam = CameraScreen(self)
         self.reminders = RemindersScreen(self); self.addrem = AddReminderScreen(self)
         self.settings = SettingsScreen(self); self.wifi = WiFiScreen(self)
-        for s in (self.home, self.med, self.reminders, self.addrem, self.settings, self.wifi):
+        for s in (self.home, self.med, self.cam, self.reminders, self.addrem, self.settings, self.wifi):
             s.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
             self.stack.addWidget(s)
         for s in old:
