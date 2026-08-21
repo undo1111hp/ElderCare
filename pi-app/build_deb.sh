@@ -2,7 +2,7 @@
 # Build the ptalk-signature-native .deb on the Pi (run from the source root).
 set -e
 SRC="$(cd "$(dirname "$0")" && pwd)"
-VER=0.7.2
+VER=0.7.3
 PKG=ptalk-signature-native
 OUT="$HOME/ptalk-build"
 STAGE="$OUT/${PKG}_${VER}"
